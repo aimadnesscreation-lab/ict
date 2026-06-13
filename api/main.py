@@ -21,7 +21,6 @@ from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.breaker_block import BreakerBlockDetector
-from signal_engine.engine import SignalEngine
 from backtesting.engine import BacktestEngine
 from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
@@ -131,6 +130,22 @@ async def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
     ]).drop("_group").sort("timestamp")
     return resampled
 
+
+async def _resample_5m_to_4h(df: pl.DataFrame) -> pl.DataFrame:
+    """Resample 5m candles to 4H locally (48 five-minute candles = 1 four-hour candle)."""
+    df = df.sort("timestamp")
+    df = df.with_row_index()
+    df = df.with_columns((pl.col("index") // 48).alias("_group"))
+    resampled = df.group_by("_group", maintain_order=True).agg([
+        pl.col("timestamp").first().alias("timestamp"),
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume"),
+    ]).drop("_group").sort("timestamp")
+    return resampled
+
 async def _signal_worker(collector: CoinGeckoCollector):
     """
     Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
@@ -161,7 +176,9 @@ async def _signal_worker(collector: CoinGeckoCollector):
         try:
             all_signals: List[Dict] = []
 
+            htf_bias = "neutral"
             df_15m_backtest = pl.DataFrame()
+
             for symbol in SIGNAL_SYMBOLS:
                 # Fetch 5m data once per symbol, resample to 15m locally
                 df_5m = await collector.fetch_historical(symbol, "5m", 288)
@@ -174,6 +191,15 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 # Save BTC 15m data for backtest
                 if symbol == "BTCUSDT":
                     df_15m_backtest = df_15m
+
+                    # Compute 4H bias from BTC 5m data (no extra API call)
+                    try:
+                        df_4h_bias = await _resample_5m_to_4h(df_5m)
+                        df_4h_bias = ict_ms.detect_swings(df_4h_bias)
+                        htf_bias = determine_bias_from_swings(df_4h_bias)
+                        logger.info(f"4H bias: {htf_bias.upper()} (from BTC 5m→4H)")
+                    except Exception as e:
+                        logger.warning(f"4H bias detection failed: {e}")
 
                 # Analyze both timeframes
                 for tf, df in [("5m", df_5m), ("15m", df_15m)]:
@@ -194,9 +220,11 @@ async def _signal_worker(collector: CoinGeckoCollector):
                                  and df["liquidity_sweep_type"].is_not_null().any())
 
                     # Generate signal with full confluence scoring
+                    # 4H bias is passed so the engine knows the HTF direction
                     signal = signal_engine.generate_signal(
                         df, mss=has_mss, sweep=has_sweep,
                         news_sentiment=0.0, timeframe=tf,
+                        htf_bias=htf_bias,
                     )
                     signal["symbol"] = symbol
                     signal["id"] = None
@@ -222,6 +250,24 @@ async def _signal_worker(collector: CoinGeckoCollector):
                         signal["confidence"] = round(random.uniform(0.10, 0.25), 2)
 
                     all_signals.append(signal)
+
+            # ── Filter signals that don't align with 4H bias ───────────
+            if htf_bias != "neutral":
+                filtered = []
+                for s in all_signals:
+                    if s.get("htf_aligned", True):
+                        filtered.append(s)
+                    else:
+                        logger.info(
+                            f"Filtered {s.get('symbol','')} {s.get('signal_type','')} "
+                            f"(4H={htf_bias}) — not aligned"
+                        )
+                if len(filtered) < len(all_signals):
+                    logger.info(
+                        f"4H bias filter: kept {len(filtered)}/{len(all_signals)} signals "
+                        f"(4H is {htf_bias.upper()})"
+                    )
+                all_signals = filtered
 
             # Assign IDs and store
             for s in all_signals:
@@ -380,6 +426,8 @@ def format_signal(s: Dict) -> Dict:
             "bias": details.get("bias", "neutral"),
             "news_sentiment": details.get("news_sentiment", 0.0),
             "in_kill_zone": s.get("in_kill_zone", False),
+            "htf_bias": s.get("htf_bias", "neutral"),
+            "htf_aligned": s.get("htf_aligned", True),
             "active_sessions": details.get("active_sessions", []),
             "active_kill_zones": details.get("active_kill_zones", []),
         },

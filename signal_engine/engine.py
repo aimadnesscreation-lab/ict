@@ -5,6 +5,41 @@ from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.breaker_block import BreakerBlockDetector
 
 
+def determine_bias_from_swings(df: pl.DataFrame) -> str:
+    """
+    Determine trend bias from swing structure in a dataframe.
+    The dataframe must have swing_high and swing_low columns.
+
+    Bullish: series of HH + HL (higher highs + higher lows)
+    Bearish: series of LL + LH (lower lows + lower highs)
+    Neutral: no clear structure or insufficient data
+    """
+    if "swing_high" not in df.columns or "swing_low" not in df.columns:
+        return "neutral"
+
+    recent_highs = df["swing_high"].drop_nulls().tail(4).to_list()
+    recent_lows = df["swing_low"].drop_nulls().tail(4).to_list()
+
+    if len(recent_highs) < 2 or len(recent_lows) < 2:
+        return "neutral"
+
+    # Check for HH + HL (bullish)
+    hh = all(recent_highs[i] > recent_highs[i - 1] for i in range(1, len(recent_highs)))
+    hl = all(recent_lows[i] > recent_lows[i - 1] for i in range(1, len(recent_lows)))
+
+    if hh and hl:
+        return "bullish"
+
+    # Check for LL + LH (bearish)
+    ll = all(recent_lows[i] < recent_lows[i - 1] for i in range(1, len(recent_lows)))
+    lh = all(recent_highs[i] < recent_highs[i - 1] for i in range(1, len(recent_highs)))
+
+    if ll and lh:
+        return "bearish"
+
+    return "neutral"
+
+
 class SignalEngine:
     """
     Full ICT confluence scoring engine.
@@ -46,38 +81,6 @@ class SignalEngine:
         self.pd_detector = PremiumDiscountDetector()
         self.breaker_detector = BreakerBlockDetector()
 
-    def _determine_bias(self, df: pl.DataFrame) -> str:
-        """
-        Determine trend bias from swing structure.
-        Bullish: series of HH + HL (higher highs + higher lows)
-        Bearish: series of LL + LH (lower lows + lower highs)
-        Neutral: no clear structure
-        """
-        if "swing_high" not in df.columns or "swing_low" not in df.columns:
-            return "neutral"
-
-        recent_highs = df["swing_high"].drop_nulls().tail(4).to_list()
-        recent_lows = df["swing_low"].drop_nulls().tail(4).to_list()
-
-        if len(recent_highs) < 2 or len(recent_lows) < 2:
-            return "neutral"
-
-        # Check for HH + HL (bullish)
-        hh = all(recent_highs[i] > recent_highs[i - 1] for i in range(1, len(recent_highs)))
-        hl = all(recent_lows[i] > recent_lows[i - 1] for i in range(1, len(recent_lows)))
-
-        if hh and hl:
-            return "bullish"
-
-        # Check for LL + LH (bearish)
-        ll = all(recent_lows[i] < recent_lows[i - 1] for i in range(1, len(recent_lows)))
-        lh = all(recent_highs[i] < recent_highs[i - 1] for i in range(1, len(recent_highs)))
-
-        if ll and lh:
-            return "bearish"
-
-        return "neutral"
-
     def generate_signal(
         self,
         df: pl.DataFrame,
@@ -85,18 +88,34 @@ class SignalEngine:
         sweep: bool = False,
         news_sentiment: float = 0.0,
         timeframe: str = "1h",
+        htf_bias: Optional[str] = None,
     ) -> Dict:
         """
         Generate a signal based on full ICT confluence scoring.
+
+        Args:
+            df: Candle data with ICT detection columns
+            mss: Whether a Market Structure Shift was detected
+            sweep: Whether a Liquidity Sweep was detected
+            news_sentiment: News sentiment score (-1 to 1)
+            timeframe: Candle timeframe label
+            htf_bias: Higher timeframe bias ("bullish"/"bearish"/"neutral")
+                     If provided, this is used for the bias score.
+                     If None, bias is computed from the dataframe itself.
         """
         score = 0
         current_candle = df.tail(1).to_dicts()[0]
         current_price = current_candle.get("close", 0)
 
-        # 1. Bias / HTF Alignment
-        bias = self._determine_bias(df)
-        if bias != "neutral":
-            score += self.weights["bias"]
+        # 1. Bias / HTF Alignment — USE HTF BIAS if provided
+        if htf_bias is not None:
+            bias = htf_bias
+            if bias != "neutral":
+                score += self.weights["bias"]
+        else:
+            bias = determine_bias_from_swings(df)
+            if bias != "neutral":
+                score += self.weights["bias"]
 
         # 2. MSS
         if mss:
@@ -151,6 +170,14 @@ class SignalEngine:
         else:
             signal_type = "STRONG_SELL"
 
+        # Determine the effective direction from the signal for filtering
+        htf_aligned = True
+        if htf_bias is not None and htf_bias != "neutral":
+            if htf_bias == "bullish" and "SELL" in signal_type:
+                htf_aligned = False
+            elif htf_bias == "bearish" and "BUY" in signal_type:
+                htf_aligned = False
+
         return {
             "score": score,
             "signal_type": signal_type,
@@ -158,6 +185,8 @@ class SignalEngine:
             "price": current_price,
             "timeframe": timeframe,
             "bias": bias,
+            "htf_bias": htf_bias if htf_bias is not None else bias,
+            "htf_aligned": htf_aligned,
             "in_kill_zone": in_kill_zone,
             "details": {
                 "mss": mss,
@@ -168,6 +197,8 @@ class SignalEngine:
                 "discount": current_candle.get("in_discount", False),
                 "ote": current_candle.get("in_ote", False),
                 "bias": bias,
+                "htf_bias": htf_bias if htf_bias is not None else bias,
+                "htf_aligned": htf_aligned,
                 "in_kill_zone": in_kill_zone,
                 "active_sessions": active_sessions,
                 "active_kill_zones": active_kill_zones,
