@@ -29,7 +29,7 @@ class CoinGeckoCollector(BaseCollector):
         super().__init__(symbols, timeframes)
         self.base_url = "https://api.coingecko.com/api/v3"
         self._last_request_time = 0.0
-        self._min_interval = 0.6  # minimum seconds between requests (~1.6 req/s)
+        self._min_interval = 6.0  # minimum seconds between requests (free tier: 10-30 calls/min)
 
     async def start(self):
         self.is_running = True
@@ -69,19 +69,34 @@ class CoinGeckoCollector(BaseCollector):
             logger.error(f"Unsupported timeframe for CoinGecko: {timeframe}")
             return pl.DataFrame()
 
-        await self._throttle()
+        # Retry up to 2 times on rate-limit (429)
+        max_retries = 2
+        for attempt in range(1, max_retries + 1):
+            await self._throttle()
 
-        url = f"{self.base_url}/coins/{coin_id}/ohlc"
-        params = {"vs_currency": "usd", "days": days}
+            url = f"{self.base_url}/coins/{coin_id}/ohlc"
+            params = {"vs_currency": "usd", "days": days}
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
             try:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                data = response.json()
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(url, params=params)
+                    if response.status_code == 429:
+                        logger.warning(f"CoinGecko rate-limited ({symbol} {timeframe}), retry {attempt}/{max_retries}...")
+                        await asyncio.sleep(10.0)
+                        continue
+                    response.raise_for_status()
+                    data = response.json()
+                    break  # success
             except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"CoinGecko fetch failed ({symbol} {timeframe}), retry {attempt}/{max_retries}: {e}")
+                    await asyncio.sleep(10.0)
+                    continue
                 logger.error(f"CoinGecko fetch failed for {symbol} {timeframe}: {e}")
                 return pl.DataFrame()
+        else:
+            logger.error(f"CoinGecko fetch failed for {symbol} {timeframe} after {max_retries} retries.")
+            return pl.DataFrame()
 
             if not data or not isinstance(data, list):
                 logger.warning(f"CoinGecko returned empty data for {symbol} {timeframe}")
