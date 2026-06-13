@@ -1,6 +1,4 @@
 import polars as pl
-from typing import Optional, List, Dict
-from datetime import datetime
 
 class MarketStructure:
     def __init__(self, n: int = 3):

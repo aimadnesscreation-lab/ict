@@ -5,6 +5,7 @@ from market_data.binance import BinanceCollector
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.order_blocks import OrderBlockDetector
+from ict_engine.liquidity import LiquidityDetector
 from signal_engine.engine import SignalEngine
 from news_engine.engine import NewsEngine
 
@@ -26,11 +27,13 @@ async def run_smoke_test():
         ms = MarketStructure(n=2)
         fvg = FVGDetector()
         ob = OrderBlockDetector()
+        liquidity = LiquidityDetector()
         
         df = ms.detect_swings(df)
         df = ms.detect_bos_mss(df)
         df = fvg.detect_fvgs(df)
         df = ob.detect_order_blocks(df)
+        df = liquidity.detect_all(df)
         
         logger.info("✅ ICT Analysis complete. Columns: " + ", ".join(df.columns))
 
@@ -45,8 +48,8 @@ async def run_smoke_test():
         logger.info("Step 4: Generating trading signals...")
         engine = SignalEngine()
         # Check if we have any detections to pass
-        has_mss = df["mss"].is_not_null().any()
-        has_sweep = False # Logic for sweep detection would be here
+        has_mss = df["mss"].is_not_null().any() if "mss" in df.columns else False
+        has_sweep = df["liquidity_sweep_type"].is_not_null().any() if "liquidity_sweep_type" in df.columns else False
         
         signal = engine.generate_signal(df, mss=has_mss, sweep=has_sweep, news_sentiment=sentiment)
         signal["symbol"] = "BTCUSDT"

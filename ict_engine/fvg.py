@@ -1,6 +1,5 @@
 import polars as pl
 from typing import List, Dict
-from datetime import datetime
 
 class FVGDetector:
     def detect_fvgs(self, df: pl.DataFrame) -> pl.DataFrame:

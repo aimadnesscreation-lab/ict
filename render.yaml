@@ -1,0 +1,35 @@
+# Render Blueprint — deploy both API and Dashboard
+# https://render.com/docs/blueprint-spec
+
+services:
+  # ── Backend API (FastAPI + Background Workers) ──────────────────
+  - type: web
+    name: ict-trading-api
+    runtime: python
+    region: oregon
+    plan: free
+    buildCommand: pip install .
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    envVars:
+      - fromGroup: trading-settings
+
+  # ── Frontend Dashboard (Static Site) ────────────────────────────
+  - type: web
+    name: ict-trading-dashboard
+    runtime: static
+    region: oregon
+    buildCommand: cd dashboard && npm ci && npm run build
+    staticPublishPath: dashboard/dist
+    pullRequestPreviewsEnabled: false
+    envVars:
+      - key: VITE_API_URL
+        value: https://ict-trading-api.onrender.com
+
+envVarGroups:
+  - name: trading-settings
+    envVars:
+      - key: TWELVEDATA_API_KEY
+        value: 208fd0a8b2a6402f962443758ad6c208
+      - key: DISCORD_WEBHOOK_URL
+        sync: false  # you'll paste it in Render dashboard

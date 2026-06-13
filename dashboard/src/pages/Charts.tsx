@@ -1,7 +1,9 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import ICTChart from '../components/ICTChart';
 import { useQuery } from '@tanstack/react-query';
 import { tradingApi } from '../services/api';
+
+const _NOW = Math.floor(Date.now() / 1000);
 
 const Charts: React.FC = () => {
   const { data: candles, isLoading } = useQuery({
@@ -9,14 +11,17 @@ const Charts: React.FC = () => {
     queryFn: () => tradingApi.getCandles('EURUSD', '1h', 200),
   });
 
-  // Mock data for initial load if API is not running
-  const mockCandles = Array.from({ length: 100 }, (_, i) => ({
-    time: (Date.now() / 1000 - (100 - i) * 3600) as any,
-    open: 1.1000 + Math.random() * 0.01,
-    high: 1.1100 + Math.random() * 0.01,
-    low: 1.0900 + Math.random() * 0.01,
-    close: 1.1050 + Math.random() * 0.01,
-  }));
+  // Stable mock data — computed once to avoid impure calls during render
+  const mockCandles = useMemo(() => {
+    const base = 1.1000;
+    return Array.from({ length: 100 }, (_, i) => ({
+      time: Math.floor(_NOW - (100 - i) * 3600) as any,
+      open: base + Math.sin(i * 0.3) * 0.01,
+      high: base + Math.sin(i * 0.3) * 0.01 + 0.005,
+      low: base + Math.sin(i * 0.3) * 0.01 - 0.005,
+      close: base + Math.sin(i * 0.3 + 0.2) * 0.01,
+    }));
+  }, []);
 
   const displayData = candles && candles.length > 0 ? candles.map(c => ({
     time: (new Date(c.timestamp).getTime() / 1000) as any,

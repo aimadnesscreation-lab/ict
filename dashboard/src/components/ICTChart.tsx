@@ -1,9 +1,12 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, ISeriesApi, CandlestickData, Time } from 'lightweight-charts';
+import { createChart, ColorType, CandlestickData } from 'lightweight-charts';
 
 interface ICTChartProps {
-  data: CandlestickData[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: CandlestickData[] & Array<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   fvgs?: any[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   orderBlocks?: any[];
 }
 
@@ -41,13 +44,8 @@ const ICTChart: React.FC<ICTChartProps> = ({ data, fvgs = [], orderBlocks = [] }
 
     candlestickSeries.setData(data);
 
-    // Overlay FVGs
-    fvgs.forEach(fvg => {
-      const color = fvg.type === 'BULLISH' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(244, 63, 94, 0.2)';
-      // Using extra series or markers is one way, 
-      // but for "Zones" often we use Price Lines or custom primitives.
-      // For this MVP, we'll focus on the core chart.
-    });
+    // FVG overlays are ready for future implementation
+    // Each FVG would be drawn as a horizontal band using a LineSeries or Rectangle primitive
 
     chartRef.current = chart;
 

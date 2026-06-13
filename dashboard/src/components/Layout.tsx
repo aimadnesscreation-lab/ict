@@ -1,7 +1,8 @@
-import React from 'react';
-import { LayoutDashboard, Radio, History, LineChart, Settings, ShieldAlert } from 'lucide-react';
+import React, { useMemo } from 'react';
+import { LayoutDashboard, Radio, History, LineChart, Settings, ShieldAlert, Wifi, WifiOff, TrendingUp, TrendingDown } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { usePriceStream } from '../hooks/usePriceStream';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -13,7 +14,34 @@ interface LayoutProps {
   onPageChange: (page: string) => void;
 }
 
+const TICKER_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'];
+
 const Layout: React.FC<LayoutProps> = ({ children, activePage, onPageChange }) => {
+  const { prices, connected } = usePriceStream();
+
+  const tickerItems = useMemo(() => {
+    return TICKER_SYMBOLS.map(symbol => {
+      const tick = prices[symbol];
+      if (!tick) return null;
+      const isUp = tick.change_24h >= 0;
+      return (
+        <div key={symbol} className="flex items-center gap-1.5 px-3 py-1 rounded bg-slate-800/50 border border-slate-700/50 text-xs whitespace-nowrap">
+          <span className="font-bold text-slate-300">{symbol.replace('USDT', '')}</span>
+          <span className="font-mono font-bold text-slate-100">
+            {tick.price.toLocaleString(undefined, {
+              minimumFractionDigits: symbol.startsWith('XAU') ? 2 : symbol.startsWith('BTC') || symbol.startsWith('ETH') ? 2 : 4,
+              maximumFractionDigits: symbol.startsWith('XAU') ? 2 : symbol.startsWith('BTC') || symbol.startsWith('ETH') ? 2 : 4,
+            })}
+          </span>
+          <span className={`flex items-center gap-0.5 font-mono text-[10px] font-bold ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {isUp ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
+            {isUp ? '+' : ''}{tick.change_24h.toFixed(2)}%
+          </span>
+        </div>
+      );
+    });
+  }, [prices]);
+
   return (
     <div className="flex min-h-screen w-full bg-slate-950 text-slate-100 font-sans">
       {/* Sidebar */}
@@ -71,20 +99,37 @@ const Layout: React.FC<LayoutProps> = ({ children, activePage, onPageChange }) =
       {/* Main Content */}
       <main className="flex-1 flex flex-col">
         {/* Header */}
-        <header className="h-16 border-b border-slate-800 flex items-center justify-between px-8 bg-slate-900/50">
-          <div className="flex items-center space-x-4">
-            <span className="flex items-center space-x-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="text-sm font-medium">System Online</span>
-            </span>
-            <div className="h-4 w-px bg-slate-700" />
-            <span className="text-sm text-slate-400">Market Bias: <span className="text-emerald-400 font-bold">BULLISH</span></span>
-          </div>
-          
-          <div className="flex items-center space-x-4">
-            <div className="bg-slate-800 px-3 py-1 rounded text-sm border border-slate-700">
-              EURUSD: 1.1042
+        <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 gap-4">
+          {/* Left: Connection status & bias */}
+          <div className="flex items-center gap-4 shrink-0">
+            <div className="flex items-center gap-2">
+              {connected ? (
+                <Wifi size={14} className="text-emerald-400" />
+              ) : (
+                <WifiOff size={14} className="text-amber-400" />
+              )}
+              <span className="text-xs font-medium text-slate-400">
+                {connected ? 'LIVE' : 'MOCK'}
+              </span>
             </div>
+            <div className="h-4 w-px bg-slate-700" />
+            <span className="text-xs text-slate-500">Bias: <span className="text-emerald-400 font-bold">BULLISH</span></span>
+          </div>
+
+          {/* Center: Ticker tape */}
+          <div className="flex-1 flex items-center gap-2 overflow-x-auto scrollbar-thin scrollbar-thumb-slate-800 scrollbar-track-transparent">
+            <div className="flex items-center gap-2">
+              {tickerItems.some(Boolean) ? tickerItems : (
+                <span className="text-xs text-slate-600 italic">Connecting to price feed...</span>
+              )}
+            </div>
+          </div>
+
+          {/* Right: Last updated */}
+          <div className="shrink-0 text-[10px] text-slate-600 whitespace-nowrap">
+            {prices[Object.keys(prices)[0]]?.timestamp
+              ? new Date(prices[Object.keys(prices)[0]].timestamp).toLocaleTimeString()
+              : ''}
           </div>
         </header>
 
