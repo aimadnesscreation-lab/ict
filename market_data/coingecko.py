@@ -98,31 +98,32 @@ class CoinGeckoCollector(BaseCollector):
             logger.error(f"CoinGecko fetch failed for {symbol} {timeframe} after {max_retries} retries.")
             return pl.DataFrame()
 
-            if not data or not isinstance(data, list):
-                logger.warning(f"CoinGecko returned empty data for {symbol} {timeframe}")
-                return pl.DataFrame()
+        # ── Success path: build DataFrame from response data ──
+        if not data or not isinstance(data, list):
+            logger.warning(f"CoinGecko returned empty data for {symbol} {timeframe}")
+            return pl.DataFrame()
 
-            # CoinGecko OHLC format: [[timestamp_ms, open, high, low, close], ...]
-            df = pl.DataFrame({
-                "timestamp": [datetime.fromtimestamp(x[0] / 1000) for x in data],
-                "open": [float(x[1]) for x in data],
-                "high": [float(x[2]) for x in data],
-                "low": [float(x[3]) for x in data],
-                "close": [float(x[4]) for x in data],
-                "volume": [0.0 for _ in data],  # CoinGecko OHLC has no volume
-            })
+        # CoinGecko OHLC format: [[timestamp_ms, open, high, low, close], ...]
+        df = pl.DataFrame({
+            "timestamp": [datetime.fromtimestamp(x[0] / 1000) for x in data],
+            "open": [float(x[1]) for x in data],
+            "high": [float(x[2]) for x in data],
+            "low": [float(x[3]) for x in data],
+            "close": [float(x[4]) for x in data],
+            "volume": [0.0 for _ in data],  # CoinGecko OHLC has no volume
+        })
 
-            # Resample 5m → 15m if needed
-            if timeframe == "15m":
-                df = self._resample_5m_to_15m(df)
-                logger.debug(f"Resampled 5m→15m: {len(df)} candles for {symbol}")
+        # Resample 5m → 15m if needed
+        if timeframe == "15m":
+            df = self._resample_5m_to_15m(df)
+            logger.debug(f"Resampled 5m→15m: {len(df)} candles for {symbol}")
 
-            # Trim to limit
-            if len(df) > limit:
-                df = df.tail(limit)
+        # Trim to limit
+        if len(df) > limit:
+            df = df.tail(limit)
 
-            logger.debug(f"Fetched {len(df)} candles for {symbol} {timeframe}")
-            return df
+        logger.debug(f"Fetched {len(df)} candles for {symbol} {timeframe}")
+        return df
 
     def _resample_5m_to_15m(self, df: pl.DataFrame) -> pl.DataFrame:
         """Resample 5-minute candles to 15-minute candles.
