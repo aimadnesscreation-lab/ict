@@ -64,8 +64,8 @@ _background_tasks: List[asyncio.Task] = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start all background workers on startup, cancel on shutdown."""
-    # Multi-timeframe collector — supports 5m, 15m, 1h
-    TIMEFRAMES = ["5m", "15m", "1h"]
+    # Multi-timeframe collector — supports 5m, 15m
+    TIMEFRAMES = ["5m", "15m"]
     collector = CoinGeckoCollector(symbols=["BTCUSDT", "ETHUSDT"], timeframes=TIMEFRAMES)
 
     # Start crypto price polling worker (CoinGecko, no WebSocket needed)
@@ -142,9 +142,8 @@ async def _signal_worker(collector: CoinGeckoCollector):
     ict_breaker = BreakerBlockDetector()
     signal_engine = SignalEngine()
     backtester = BacktestEngine(initial_capital=10000.0, rr_target=2.0, rr_stop=1.0)
-
     # Timeframes and symbols
-    TIMEFRAMES = ["5m", "15m", "1h"]
+    TIMEFRAMES = ["5m", "15m"]
     SIGNAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
     # How long to sleep between cycles (fastest timeframe = 5m)
@@ -157,6 +156,7 @@ async def _signal_worker(collector: CoinGeckoCollector):
         try:
             all_signals: List[Dict] = []
 
+            df_15m_backtest = pl.DataFrame()
             for symbol in SIGNAL_SYMBOLS:
                 # Fetch 5m data once per symbol, resample to 15m locally
                 df_5m = await collector.fetch_historical(symbol, "5m", 288)
@@ -165,14 +165,13 @@ async def _signal_worker(collector: CoinGeckoCollector):
                     continue
 
                 df_15m = await _resample_5m_to_15m(df_5m)
-                df_1h = await collector.fetch_historical(symbol, "1h", 200)
 
-                # Analyze each timeframe
-                timeframes_data = [("5m", df_5m), ("15m", df_15m)]
-                if not df_1h.is_empty():
-                    timeframes_data.append(("1h", df_1h))
+                # Save BTC 15m data for backtest
+                if symbol == "BTCUSDT":
+                    df_15m_backtest = df_15m
 
-                for tf, df in timeframes_data:
+                # Analyze both timeframes
+                for tf, df in [("5m", df_5m), ("15m", df_15m)]:
 
                     # Run ICT detection pipeline
                     df = ict_ms.detect_swings(df)
@@ -221,12 +220,8 @@ async def _signal_worker(collector: CoinGeckoCollector):
             if len(_recent_signals) > 500:
                 _recent_signals = _recent_signals[:500]
 
-            # ── Backtest using BTCUSDT 15m data ──
-            df_bt_15m = pl.DataFrame()
-            df_5m = await collector.fetch_historical("BTCUSDT", "5m", 288)
-            if not df_5m.is_empty():
-                df_bt_15m = await _resample_5m_to_15m(df_5m)
-            if not df_bt_15m.is_empty():
+            # ── Backtest using BTCUSDT 15m (already fetched above, no extra API call) ──
+            if not df_15m_backtest.is_empty():
                 try:
                     bt_signals = []
                     for s in all_signals:
