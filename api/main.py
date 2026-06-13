@@ -4,6 +4,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 import random
 import os
+import time
 import asyncio
 import json
 import httpx
@@ -701,19 +702,28 @@ async def _twelve_data_worker():
 
 async def _crypto_price_worker():
     """
-    Background task: poll CoinGecko's simple/price endpoint every 60s
+    Background task: poll CoinGecko's simple/price endpoint every 120s
     and update _latest_ticks / _latest_prices with current crypto prices.
     CoinGecko doesn't offer WebSocket, so we poll instead.
+    Uses a light throttle to stay under CoinGecko's free tier rate limit.
     """
     url = f"https://api.coingecko.com/api/v3/simple/price?ids={COINGECKO_IDS}&vs_currencies=usd"
+    _last_price_fetch = 0.0
 
     while True:
         try:
+            # Light throttle: at least 2s between price calls
+            now = time.time()
+            elapsed = now - _last_price_fetch
+            if elapsed < 2.0:
+                await asyncio.sleep(2.0 - elapsed)
+
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(url)
+                _last_price_fetch = time.time()
                 if resp.status_code != 200:
                     logger.warning(f"CoinGecko price: HTTP {resp.status_code}")
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(120)
                     continue
 
                 data = resp.json()
@@ -736,7 +746,7 @@ async def _crypto_price_worker():
         except Exception as e:
             logger.warning(f"CoinGecko price poll error: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(120)
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────
