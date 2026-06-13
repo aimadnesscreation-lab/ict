@@ -26,6 +26,7 @@ from backtesting.engine import BacktestEngine
 from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
 from discord.bot import DiscordBot
+from demo_account import DemoAccount
 
 # ── App state ─────────────────────────────────────────────────────────
 _signal_id_counter = 0
@@ -146,6 +147,7 @@ async def _signal_worker(collector: CoinGeckoCollector):
     ict_breaker = BreakerBlockDetector()
     signal_engine = SignalEngine()
     backtester = BacktestEngine(initial_capital=10000.0, rr_target=2.0, rr_stop=1.0)
+    demo_account = DemoAccount(initial_balance=10_000.0, risk_per_trade_pct=1.0)
     # Timeframes and symbols
     TIMEFRAMES = ["5m", "15m"]
     SIGNAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -199,6 +201,13 @@ async def _signal_worker(collector: CoinGeckoCollector):
                     signal["symbol"] = symbol
                     signal["id"] = None
 
+                    # Attach ATR from the dataframe for demo account SL/TP calc
+                    if "atr" in df.columns:
+                        latest_atr = df["atr"].tail(1).to_list()
+                        signal["atr"] = latest_atr[0] if latest_atr and latest_atr[0] is not None else 0.0
+                    else:
+                        signal["atr"] = 0.0
+
                     # Add confidence estimate
                     score = signal["score"]
                     if score >= 80:
@@ -223,24 +232,31 @@ async def _signal_worker(collector: CoinGeckoCollector):
             if len(_recent_signals) > 500:
                 _recent_signals = _recent_signals[:500]
 
-            # ── Backtest using BTCUSDT 15m (already fetched above, no extra API call) ──
-            if not df_15m_backtest.is_empty():
-                try:
-                    bt_signals = []
+            # ── Demo Account: forward-test signals with 1% risk, ATR SL, 1:2 RR ──
+            # Build a map of current prices (latest close from price polling + candle data)
+            try:
+                current_prices = dict(_latest_prices)  # gets BTC, ETH, forex from price workers
+                # Override with the most recent candle close if we have it
+                for symbol in SIGNAL_SYMBOLS:
                     for s in all_signals:
-                        bt_signals.append({
-                            "timestamp": s.get("timestamp"),
-                            "price": s.get("price", 0),
-                            "signal_type": s.get("signal_type", "NEUTRAL"),
-                        })
-                    backtester.trades = []
-                    report = backtester.run(df_15m_backtest, bt_signals)
-                    _recent_trades = backtester.trades + _recent_trades
-                    if len(_recent_trades) > 500:
-                        _recent_trades = _recent_trades[:500]
-                    _performance_cache = report
-                except Exception as e:
-                    logger.warning(f"Backtest failed: {e}")
+                        if s.get("symbol") == symbol and s.get("price", 0) > 0:
+                            current_prices[symbol] = s["price"]
+
+                # Process signals through the demo account
+                demo_account.process_signals(all_signals, current_prices)
+
+                # Replace trade history fresh each cycle (no duplicates)
+                _recent_trades = demo_account.get_closed_trades_list(500)
+                perf = demo_account.get_performance()
+                perf["open_positions_count"] = len(demo_account.open_positions)
+                perf["open_positions"] = demo_account.get_open_positions_list()
+                _performance_cache = perf
+
+                open_count = len(demo_account.open_positions)
+                if open_count > 0:
+                    logger.info(f"Demo account: {open_count} open position(s)")
+            except Exception as e:
+                logger.warning(f"Demo account processing failed: {e}")
 
             # ── Send strong signals to Discord (only during kill zones) ──
             if discord_bot:
@@ -506,6 +522,47 @@ async def get_performance():
         "total_trades": p.get("total_trades", 0),
         "avg_rr": p.get("avg_rr", 0.0),
     }
+
+
+# ─── Demo Account (forward-testing) ───────────────────────────────
+
+@app.get("/demo/account")
+async def get_demo_account():
+    """Return demo account overview — balance, open positions, performance."""
+    # The demo_account is created inside _signal_worker, so we access it via
+    # the latest performance cache + open positions from the global state.
+    # Since _performance_cache is updated by the demo account each cycle, we
+    # can enrich it with the account balance and open positions info.
+    summary = {
+        "balance": _performance_cache.get("capital_remaining", 10000.0)
+            if _performance_cache else 10000.0,
+        "initial_balance": 10000.0,
+        "total_profit": _performance_cache.get("total_profit", 0.0)
+            if _performance_cache else 0.0,
+        "total_trades": _performance_cache.get("total_trades", 0)
+            if _performance_cache else 0,
+        "win_rate": _performance_cache.get("win_rate", 0.0)
+            if _performance_cache else 0.0,
+        "profit_factor": _performance_cache.get("profit_factor", 0.0)
+            if _performance_cache else 0.0,
+        "max_drawdown": _performance_cache.get("max_drawdown", 0.0)
+            if _performance_cache else 0.0,
+        "avg_rr": _performance_cache.get("avg_rr", 0.0)
+            if _performance_cache else 0.0,
+        "total_wins": _performance_cache.get("total_wins", 0)
+            if _performance_cache else 0,
+        "total_losses": _performance_cache.get("total_losses", 0)
+            if _performance_cache else 0,
+        "peak_balance": _performance_cache.get("peak_balance", 10000.0)
+            if _performance_cache else 10000.0,
+        "current_drawdown_pct": _performance_cache.get("current_drawdown_pct", 0.0)
+            if _performance_cache else 0.0,
+        "open_positions_count": _performance_cache.get("open_positions_count", 0)
+            if _performance_cache else 0,
+        "open_positions": _performance_cache.get("open_positions", [])
+            if _performance_cache else [],
+    }
+    return summary
 
 
 # ─── Risk (real, from RiskManager) ───────────────────────────────────
