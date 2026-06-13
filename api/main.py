@@ -231,7 +231,7 @@ async def _signal_worker(collector: CoinGeckoCollector):
                             "signal_type": s.get("signal_type", "NEUTRAL"),
                         })
                     backtester.trades = []
-                    report = backtester.run(df_bt_15m, bt_signals)
+                    report = backtester.run(df_15m_backtest, bt_signals)
                     _recent_trades = backtester.trades + _recent_trades
                     if len(_recent_trades) > 500:
                         _recent_trades = _recent_trades[:500]
