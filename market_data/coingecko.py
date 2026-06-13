@@ -1,3 +1,5 @@
+import asyncio
+import time
 import httpx
 import polars as pl
 from typing import List
@@ -26,6 +28,8 @@ class CoinGeckoCollector(BaseCollector):
     def __init__(self, symbols: List[str], timeframes: List[str]):
         super().__init__(symbols, timeframes)
         self.base_url = "https://api.coingecko.com/api/v3"
+        self._last_request_time = 0.0
+        self._min_interval = 0.6  # minimum seconds between requests (~1.6 req/s)
 
     async def start(self):
         self.is_running = True
@@ -34,6 +38,14 @@ class CoinGeckoCollector(BaseCollector):
     async def stop(self):
         self.is_running = False
         logger.info("CoinGecko Collector stopped.")
+
+    async def _throttle(self):
+        """Ensure minimum interval between API requests."""
+        now = time.time()
+        elapsed = now - self._last_request_time
+        if elapsed < self._min_interval:
+            await asyncio.sleep(self._min_interval - elapsed)
+        self._last_request_time = time.time()
 
     async def fetch_historical(
         self, symbol: str, timeframe: str, limit: int = 500
@@ -56,6 +68,8 @@ class CoinGeckoCollector(BaseCollector):
         else:
             logger.error(f"Unsupported timeframe for CoinGecko: {timeframe}")
             return pl.DataFrame()
+
+        await self._throttle()
 
         url = f"{self.base_url}/coins/{coin_id}/ohlc"
         params = {"vs_currency": "usd", "days": days}

@@ -7,6 +7,7 @@ import os
 import asyncio
 import json
 import httpx
+import polars as pl
 from loguru import logger
 from contextlib import asynccontextmanager
 
@@ -109,6 +110,21 @@ app.add_middleware(
 
 # ── Background workers ────────────────────────────────────────────────
 
+async def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
+    """Resample 5m candles to 15m locally (no API call needed)."""
+    df = df.sort("timestamp")
+    df = df.with_row_index()
+    df = df.with_columns((pl.col("index") // 3).alias("_group"))
+    resampled = df.group_by("_group", maintain_order=True).agg([
+        pl.col("timestamp").first().alias("timestamp"),
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume"),
+    ]).drop("_group").sort("timestamp")
+    return resampled
+
 async def _signal_worker(collector: CoinGeckoCollector):
     """
     Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
@@ -141,13 +157,21 @@ async def _signal_worker(collector: CoinGeckoCollector):
             all_signals: List[Dict] = []
 
             for symbol in SIGNAL_SYMBOLS:
-                for tf in TIMEFRAMES:
-                    # Fetch candles — more candles for lower timeframes
-                    candle_limit = 500 if tf == "5m" else 300 if tf == "15m" else 200
-                    df = await collector.fetch_historical(symbol, tf, candle_limit)
-                    if df.is_empty():
-                        logger.warning(f"No candle data for {symbol} {tf}, skipping.")
-                        continue
+                # Fetch 5m data once per symbol, resample to 15m locally
+                df_5m = await collector.fetch_historical(symbol, "5m", 288)
+                if df_5m.is_empty():
+                    logger.warning(f"No 5m candle data for {symbol}, skipping.")
+                    continue
+
+                df_15m = await _resample_5m_to_15m(df_5m)
+                df_1h = await collector.fetch_historical(symbol, "1h", 200)
+
+                # Analyze each timeframe
+                timeframes_data = [("5m", df_5m), ("15m", df_15m)]
+                if not df_1h.is_empty():
+                    timeframes_data.append(("1h", df_1h))
+
+                for tf, df in timeframes_data:
 
                     # Run ICT detection pipeline
                     df = ict_ms.detect_swings(df)
@@ -196,24 +220,26 @@ async def _signal_worker(collector: CoinGeckoCollector):
             if len(_recent_signals) > 500:
                 _recent_signals = _recent_signals[:500]
 
-            # ── Backtest on 15m candles (mid-ground timeframe) ──
-            if all_signals:
+            # ── Backtest using BTCUSDT 15m data ──
+            df_bt_15m = pl.DataFrame()
+            df_5m = await collector.fetch_historical("BTCUSDT", "5m", 288)
+            if not df_5m.is_empty():
+                df_bt_15m = await _resample_5m_to_15m(df_5m)
+            if not df_bt_15m.is_empty():
                 try:
-                    df_bt = await collector.fetch_historical("BTCUSDT", "15m", 300)
-                    if not df_bt.is_empty():
-                        bt_signals = []
-                        for s in all_signals:
-                            bt_signals.append({
-                                "timestamp": s.get("timestamp"),
-                                "price": s.get("price", 0),
-                                "signal_type": s.get("signal_type", "NEUTRAL"),
-                            })
-                        backtester.trades = []
-                        report = backtester.run(df_bt, bt_signals)
-                        _recent_trades = backtester.trades + _recent_trades
-                        if len(_recent_trades) > 500:
-                            _recent_trades = _recent_trades[:500]
-                        _performance_cache = report
+                    bt_signals = []
+                    for s in all_signals:
+                        bt_signals.append({
+                            "timestamp": s.get("timestamp"),
+                            "price": s.get("price", 0),
+                            "signal_type": s.get("signal_type", "NEUTRAL"),
+                        })
+                    backtester.trades = []
+                    report = backtester.run(df_bt_15m, bt_signals)
+                    _recent_trades = backtester.trades + _recent_trades
+                    if len(_recent_trades) > 500:
+                        _recent_trades = _recent_trades[:500]
+                    _performance_cache = report
                 except Exception as e:
                     logger.warning(f"Backtest failed: {e}")
 
@@ -675,7 +701,7 @@ async def _twelve_data_worker():
 
 async def _crypto_price_worker():
     """
-    Background task: poll CoinGecko's simple/price endpoint every 30s
+    Background task: poll CoinGecko's simple/price endpoint every 60s
     and update _latest_ticks / _latest_prices with current crypto prices.
     CoinGecko doesn't offer WebSocket, so we poll instead.
     """
@@ -687,7 +713,7 @@ async def _crypto_price_worker():
                 resp = await client.get(url)
                 if resp.status_code != 200:
                     logger.warning(f"CoinGecko price: HTTP {resp.status_code}")
-                    await asyncio.sleep(30)
+                    await asyncio.sleep(60)
                     continue
 
                 data = resp.json()
@@ -710,7 +736,7 @@ async def _crypto_price_worker():
         except Exception as e:
             logger.warning(f"CoinGecko price poll error: {e}")
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────
