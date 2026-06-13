@@ -13,11 +13,11 @@ from signal_engine.engine import SignalEngine
 from news_engine.engine import NewsEngine
 from discord.bot import DiscordBot
 from database.config import settings
-from market_data.binance import BinanceCollector
+from market_data.coingecko import CoinGeckoCollector
 
 
 async def analyze_timeframe(
-    collector: BinanceCollector,
+    collector: CoinGeckoCollector,
     symbol: str,
     tf: str,
     ict_ms: MarketStructure,
@@ -61,12 +61,12 @@ async def analyze_timeframe(
 async def main():
     logger.info("Starting Institutional AI Trading Intelligence Platform...")
 
-    logger.info("📡 Mode: LIVE MARKET DATA (Binance)")
+    logger.info("📡 Mode: LIVE MARKET DATA (CoinGecko)")
 
     TIMEFRAMES = ["5m", "15m", "1h"]
     SIGNAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-    collector = BinanceCollector(symbols=SIGNAL_SYMBOLS, timeframes=TIMEFRAMES)
+    collector = CoinGeckoCollector(symbols=SIGNAL_SYMBOLS, timeframes=TIMEFRAMES)
 
     # ICT detectors
     ict_ms = MarketStructure(n=3)

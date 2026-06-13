@@ -11,7 +11,7 @@ from loguru import logger
 from contextlib import asynccontextmanager
 
 # ── Real data imports ─────────────────────────────────────────────────
-from market_data.binance import BinanceCollector
+from market_data.coingecko import CoinGeckoCollector
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.order_blocks import OrderBlockDetector
@@ -64,11 +64,11 @@ async def lifespan(app: FastAPI):
     """Start all background workers on startup, cancel on shutdown."""
     # Multi-timeframe collector — supports 5m, 15m, 1h
     TIMEFRAMES = ["5m", "15m", "1h"]
-    collector = BinanceCollector(symbols=["BTCUSDT", "ETHUSDT"], timeframes=TIMEFRAMES)
+    collector = CoinGeckoCollector(symbols=["BTCUSDT", "ETHUSDT"], timeframes=TIMEFRAMES)
 
-    # Start Binance WS price worker (crypto)
-    ws_task = asyncio.create_task(_binance_worker())
-    _background_tasks.append(ws_task)
+    # Start crypto price polling worker (CoinGecko, no WebSocket needed)
+    price_task = asyncio.create_task(_crypto_price_worker())
+    _background_tasks.append(price_task)
 
     # Start Twelve Data WS price worker (forex) — only if we have the API key
     if TWELVEDATA_API_KEY:
@@ -109,7 +109,7 @@ app.add_middleware(
 
 # ── Background workers ────────────────────────────────────────────────
 
-async def _signal_worker(collector: BinanceCollector):
+async def _signal_worker(collector: CoinGeckoCollector):
     """
     Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
     run full ICT detection pipeline, generate signals with confluence scoring.
@@ -271,7 +271,7 @@ async def _news_worker():
 
 @app.get("/")
 async def root():
-    data_sources = ["Binance (crypto)"]
+    data_sources = ["CoinGecko (crypto)"]
     if TWELVEDATA_API_KEY:
         data_sources.append("Twelve Data (forex)")
     else:
@@ -339,12 +339,12 @@ def format_signal(s: Dict) -> Dict:
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
     """
-    Fetch historical candles from Binance.
+    Fetch historical candles from CoinGecko.
     Supports crypto pairs (BTCUSDT, ETHUSDT). Forex pairs return empty with a note.
     """
     symbol = symbol.upper()
 
-    # Only crypto pairs are available via Binance
+    # Only crypto pairs are available via CoinGecko
     CRYPTO_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
 
     if symbol not in CRYPTO_SYMBOLS:
@@ -354,7 +354,7 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
         }
 
     try:
-        collector = BinanceCollector(symbols=[symbol], timeframes=[timeframe])
+        collector = CoinGeckoCollector(symbols=[symbol], timeframes=[timeframe])
         df = await collector.fetch_historical(symbol, timeframe, limit)
 
         if df.is_empty():
@@ -501,9 +501,8 @@ import websockets
 # Symbols tracked in the header ticker
 TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
 
-# ── Crypto (via Binance) ────────────────────────────────────────────────
-BINANCE_SYMBOLS = ["btcusdt", "ethusdt"]
-BINANCE_WS_URL = "wss://stream.binance.com:9443/stream?streams=" + "/".join(f"{s}@ticker" for s in BINANCE_SYMBOLS)
+# ── Crypto (via CoinGecko) ──────────────────────────────────────────────
+COINGECKO_IDS = "bitcoin,ethereum"
 
 # ── Forex (via Twelve Data) ─────────────────────────────────────────────
 FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
@@ -672,54 +671,46 @@ async def _twelve_data_worker():
         retry_delay = min(retry_delay * 2, 60.0)
 
 
-# ── Binance WebSocket background worker (crypto) ────────────────────
+# ── CoinGecko price polling worker (crypto) ──────────────────────────
 
-async def _binance_worker():
+async def _crypto_price_worker():
     """
-    Background task: maintain a persistent connection to Binance's combined
-    ticker stream and update _latest_ticks / _latest_prices in real time.
-    Reconnects with exponential backoff on failure.
+    Background task: poll CoinGecko's simple/price endpoint every 30s
+    and update _latest_ticks / _latest_prices with current crypto prices.
+    CoinGecko doesn't offer WebSocket, so we poll instead.
     """
-    retry_delay = 1.0
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={COINGECKO_IDS}&vs_currencies=usd"
 
     while True:
         try:
-            logger.info(f"Connecting to Binance WS: {BINANCE_WS_URL}")
-            async with websockets.connect(BINANCE_WS_URL, ping_interval=20) as ws:
-                logger.info("Binance WS connected.")
-                retry_delay = 1.0
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                if resp.status_code != 200:
+                    logger.warning(f"CoinGecko price: HTTP {resp.status_code}")
+                    await asyncio.sleep(30)
+                    continue
 
-                async for raw in ws:
-                    try:
-                        data = json.loads(raw)
-                        inner = data.get("data", data)
-                        symbol = inner.get("s", "").upper()
-                        if not symbol:
-                            continue
-
-                        tick = {
+                data = resp.json()
+                coin_map = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT"}
+                for coin_id, info in data.items():
+                    symbol = coin_map.get(coin_id)
+                    if symbol and "usd" in info:
+                        price = float(info["usd"])
+                        _latest_prices[symbol] = price
+                        _latest_ticks[symbol] = {
                             "symbol": symbol,
-                            "price": round(float(inner["c"]), 8),
-                            "change_24h": round(float(inner.get("P", 0)), 2),
-                            "high_24h": round(float(inner.get("h", 0)), 8),
-                            "low_24h": round(float(inner.get("l", 0)), 8),
-                            "volume": round(float(inner.get("v", 0)), 2),
-                            "timestamp": datetime.utcfromtimestamp(
-                                inner.get("E", 0) / 1000
-                            ).isoformat() + "Z",
+                            "price": price,
+                            "change_24h": 0.0,   # not available from simple/price
+                            "high_24h": price,
+                            "low_24h": price,
+                            "volume": 0,
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
                         }
-                        _latest_ticks[symbol] = tick
-                        _latest_prices[symbol] = tick["price"]
-                    except (json.JSONDecodeError, KeyError, ValueError):
-                        continue
 
-        except websockets.exceptions.WebSocketException as e:
-            logger.warning(f"Binance WS error: {e}. Reconnecting in {retry_delay:.0f}s...")
         except Exception as e:
-            logger.warning(f"Binance WS unexpected error: {e}. Reconnecting in {retry_delay:.0f}s...")
+            logger.warning(f"CoinGecko price poll error: {e}")
 
-        await asyncio.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 60.0)
+        await asyncio.sleep(30)
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────
@@ -727,7 +718,7 @@ async def _binance_worker():
 async def _stream_prices(websocket: WebSocket):
     """Stream prices to the connected dashboard client.
 
-    Crypto symbols come from Binance WS (_binance_worker).
+    Crypto symbols come from CoinGecko poll (_crypto_price_worker).
     Forex symbols come from Twelve Data WS (_twelve_data_worker)
     when the API key is configured; otherwise they fall back to mock.
     """

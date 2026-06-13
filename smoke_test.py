@@ -1,7 +1,7 @@
 import asyncio
 from loguru import logger
 import polars as pl
-from market_data.binance import BinanceCollector
+from market_data.coingecko import CoinGeckoCollector
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.order_blocks import OrderBlockDetector
@@ -14,12 +14,12 @@ async def run_smoke_test():
 
     try:
         # 1. Market Data Collection
-        logger.info("Step 1: Fetching real data from Binance...")
-        collector = BinanceCollector(symbols=["BTCUSDT"], timeframes=["1h"])
+        logger.info("Step 1: Fetching real data from CoinGecko...")
+        collector = CoinGeckoCollector(symbols=["BTCUSDT"], timeframes=["1h"])
         df = await collector.fetch_historical("BTCUSDT", "1h", limit=100)
         
         if df.is_empty():
-            raise Exception("Failed to fetch data from Binance.")
+            raise Exception("Failed to fetch data from CoinGecko.")
         logger.info(f"✅ Successfully fetched {len(df)} candles.")
 
         # 2. ICT Engine Analysis
