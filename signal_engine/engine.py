@@ -125,10 +125,16 @@ class SignalEngine:
         score += pd_scores.get("total", 0)
 
         # 8. Session / Kill Zone alignment
+        in_kill_zone = False
+        active_kill_zones: List[str] = []
+        active_sessions: List[str] = []
         if "timestamp" in current_candle:
             ts = current_candle["timestamp"]
             session_info = self.session_detector.get_current_session_info(ts)
             score += session_info.get("score_bonus", 0)
+            in_kill_zone = session_info.get("in_kill_zone", False)
+            active_kill_zones = session_info.get("active_kill_zones", [])
+            active_sessions = session_info.get("active_sessions", [])
 
         # Cap score at 100
         score = min(score, 100)
@@ -152,6 +158,7 @@ class SignalEngine:
             "price": current_price,
             "timeframe": timeframe,
             "bias": bias,
+            "in_kill_zone": in_kill_zone,
             "details": {
                 "mss": mss,
                 "sweep": sweep,
@@ -161,5 +168,8 @@ class SignalEngine:
                 "discount": current_candle.get("in_discount", False),
                 "ote": current_candle.get("in_ote", False),
                 "bias": bias,
+                "in_kill_zone": in_kill_zone,
+                "active_sessions": active_sessions,
+                "active_kill_zones": active_kill_zones,
             },
         }

@@ -149,10 +149,9 @@ async def _signal_worker(collector: CoinGeckoCollector):
     # How long to sleep between cycles (fastest timeframe = 5m)
     CYCLE_INTERVAL = 300  # 5 minutes
 
-    # Discord notification dedup
-    _last_discord_signal_type: Optional[str] = None
-
     while True:
+        # Reset Discord dedup each cycle so each KZ window gets fresh alerts
+        _last_discord_signal_type: Optional[str] = None
         try:
             all_signals: List[Dict] = []
 
@@ -239,17 +238,24 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 except Exception as e:
                     logger.warning(f"Backtest failed: {e}")
 
-            # ── Send strong signals to Discord ────────────────
+            # ── Send strong signals to Discord (only during kill zones) ──
             if discord_bot:
                 for s in all_signals:
                     stype = s.get("signal_type", "NEUTRAL")
                     score_val = s.get("score", 0)
+                    in_kz = s.get("in_kill_zone", False)
                     if score_val >= 70 and stype != _last_discord_signal_type:
-                        _last_discord_signal_type = stype
-                        try:
-                            await discord_bot.send_signal(s)
-                        except Exception as e:
-                            logger.warning(f"Discord send failed: {e}")
+                        if in_kz:
+                            _last_discord_signal_type = stype
+                            try:
+                                await discord_bot.send_signal(s)
+                            except Exception as e:
+                                logger.warning(f"Discord send failed: {e}")
+                        else:
+                            logger.info(
+                                f"Skipping Discord alert for {s.get('symbol','')} "
+                                f"{stype} (score={score_val}) — outside kill zone"
+                            )
 
             logger.info(
                 f"Signal cycle complete: {len(all_signals)} signals across "
@@ -337,6 +343,7 @@ def format_signal(s: Dict) -> Dict:
         "price": s.get("price", 0),
         "timeframe": s.get("timeframe", "1h"),
         "bias": s.get("bias", "neutral"),
+        "in_kill_zone": s.get("in_kill_zone", False),
         "timestamp": (
             s["timestamp"].isoformat()
             if hasattr(s.get("timestamp"), "isoformat")
@@ -352,6 +359,9 @@ def format_signal(s: Dict) -> Dict:
             "ote": details.get("ote", False),
             "bias": details.get("bias", "neutral"),
             "news_sentiment": details.get("news_sentiment", 0.0),
+            "in_kill_zone": s.get("in_kill_zone", False),
+            "active_sessions": details.get("active_sessions", []),
+            "active_kill_zones": details.get("active_kill_zones", []),
         },
     }
 
