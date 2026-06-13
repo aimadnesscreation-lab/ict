@@ -8,3 +8,8 @@ dashboard/dist/
 *.log
 postgres_data/
 ml_engine/models/
+session.md
+*.md
+!README.md
+!full.md
+!ict.md
