@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart, ColorType, CandlestickData } from 'lightweight-charts';
+import { createChart, ColorType, CandlestickSeries } from 'lightweight-charts';
+import type { CandlestickData } from 'lightweight-charts';
 
 interface ICTChartProps {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -34,7 +35,7 @@ const ICTChart: React.FC<ICTChartProps> = ({ data, fvgs = [], orderBlocks = [] }
       },
     });
 
-    const candlestickSeries = chart.addCandlestickSeries({
+    const candlestickSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#10b981',
       downColor: '#f43f5e',
       borderVisible: false,

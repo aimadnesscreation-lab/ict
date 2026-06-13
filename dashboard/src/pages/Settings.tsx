@@ -5,7 +5,8 @@ import {
   TrendingDown, Radio, Activity, Newspaper, Gauge,
   Wifi, WifiOff,
 } from 'lucide-react';
-import { useSettings, SignalWeights, RiskSettings, DEFAULT_SETTINGS } from '../services/settingsService';
+import { useSettings, DEFAULT_SETTINGS } from '../services/settingsService';
+import type { SignalWeights, RiskSettings } from '../services/settingsService';
 import { usePriceStream } from '../hooks/usePriceStream';
 import { computeSignal, type ComputedSignal } from '../utils/signalCalculator';
 import { clsx, type ClassValue } from 'clsx';

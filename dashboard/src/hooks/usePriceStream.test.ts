@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { usePriceStream, PriceTick } from './usePriceStream';
+import { usePriceStream } from './usePriceStream';
+import type { PriceTick } from './usePriceStream';
 
 // ── Mock WebSocket ──────────────────────────────────────────────────────
 

@@ -3,7 +3,8 @@ import { useQuery } from '@tanstack/react-query';
 import { Search, ChevronDown, ChevronUp, Radio, Activity, TrendingUp, TrendingDown, Minus, X } from 'lucide-react';
 
 const _NOW = Date.now();
-import { tradingApi, Signal } from '../services/api';
+import { tradingApi } from '../services/api';
+import type { Signal } from '../services/api';
 
 const typeColors: Record<string, { bg: string; text: string; border: string }> = {
   STRONG_BUY: { bg: 'bg-emerald-500/10', text: 'text-emerald-400', border: 'border-emerald-500/30' },

@@ -10,7 +10,12 @@ export interface PriceTick {
   timestamp: string;
 }
 
-const WS_URL = 'ws://localhost:8000/ws/prices';
+// Dynamically determine WebSocket URL from current origin.
+// In production (same origin), this becomes wss://your-domain/ws/prices
+// In local dev, set VITE_WS_URL if needed, otherwise falls back to same origin.
+const WS_URL = import.meta.env.VITE_WS_URL ?? (
+  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/prices`
+);
 const RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
@@ -51,7 +56,7 @@ export function usePriceStream() {
   const reconnectAttempt = useRef(0);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mockTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const connectRef = useRef<() => void>();
+  const connectRef = useRef<() => void>(undefined);
   const fallbackPrices = useRef<Record<string, number>>({ ...FALLBACK_BASE });
 
   const cleanup = useCallback(() => {

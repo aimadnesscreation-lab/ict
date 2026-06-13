@@ -99,10 +99,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Institutional Trading Intelligence Platform API", lifespan=lifespan)
 
-# CORS — allow the Vite dev server to talk to the API
+# CORS — allow the Vite dev server and Railway domain to talk to the API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://ict-production-b1a8.up.railway.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -752,6 +756,19 @@ async def _crypto_price_worker():
             logger.warning(f"CoinGecko price poll error: {e}")
 
         await asyncio.sleep(120)
+
+
+# ── Dashboard static files ────────────────────────────────────────────
+from fastapi.staticfiles import StaticFiles
+import os as _os
+
+_dashboard_dir = _os.path.join(_os.path.dirname(__file__), "static")
+if _os.path.isdir(_dashboard_dir) and _os.path.exists(_os.path.join(_dashboard_dir, "index.html")):
+    # Mount the entire static directory at /dashboard — serves assets + index.html with SPA fallback
+    app.mount("/dashboard", StaticFiles(directory=_dashboard_dir, html=True), name="dashboard")
+    logger.info(f"Dashboard available at /dashboard — {_dashboard_dir}")
+else:
+    logger.info("No dashboard build found — API-only mode (run 'cd dashboard && npm run build' to enable)")
 
 
 # ── WebSocket endpoint ────────────────────────────────────────────────

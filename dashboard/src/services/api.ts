@@ -1,6 +1,8 @@
 import axios from 'axios';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+// When served from the same origin as the API (Railway), use a relative path.
+// For local dev, set VITE_API_URL to http://localhost:8000 or your Railway URL.
+const API_BASE_URL = import.meta.env.VITE_API_URL ?? '';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
