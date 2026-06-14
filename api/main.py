@@ -268,6 +268,13 @@ async def _signal_worker(collector: CoinGeckoCollector):
                         f"(4H is {htf_bias.upper()})"
                     )
                 all_signals = filtered
+            else:
+                # 4H is neutral — no clear direction, skip all trading
+                logger.info(
+                    f"4H bias is NEUTRAL — skipping all {len(all_signals)} signals "
+                    f"until a clear direction forms"
+                )
+                all_signals = []
 
             # Assign IDs and store
             for s in all_signals:
