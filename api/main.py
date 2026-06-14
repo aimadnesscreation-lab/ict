@@ -26,6 +26,7 @@ from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
 from discord.bot import DiscordBot
 from demo_account import DemoAccount
+from signal_engine.engine import SignalEngine, determine_bias_from_swings
 
 # ── App state ─────────────────────────────────────────────────────────
 _signal_id_counter = 0
