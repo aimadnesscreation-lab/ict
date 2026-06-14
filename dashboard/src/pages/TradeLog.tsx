@@ -7,6 +7,13 @@ import {
 } from 'lucide-react';
 import { tradingApi, type OpenPosition } from '../services/api';
 
+// Mirror of api/main.py FOREX_PRECISION for frontend display
+const FOREX_PRECISION: Record<string, number> = {
+  EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
+};
+
+const pricePrecision = (symbol: string): number => FOREX_PRECISION[symbol] ?? 2;
+
 const TradeLog: React.FC = () => {
   const [resultFilter, setResultFilter] = useState<string>('ALL');
   const [symbolFilter, setSymbolFilter] = useState<string>('ALL');
@@ -177,20 +184,20 @@ const TradeLog: React.FC = () => {
                   <div className="grid grid-cols-2 gap-4 text-sm">
                     <div>
                       <div className="text-xs text-slate-500 mb-0.5">Entry</div>
-                      <div className="font-mono font-bold">{pos.entry_price.toFixed(pos.symbol.startsWith('XAU') ? 2 : pos.symbol.startsWith('BTC') || pos.symbol.startsWith('ETH') ? 2 : 4)}</div>
+                      <div className="font-mono font-bold">{pos.entry_price.toFixed(pricePrecision(pos.symbol))}</div>
                     </div>
                     <div>
                       <div className="text-xs text-slate-500 mb-0.5">Current</div>
-                      <div className="font-mono font-bold">{pos.current_price > 0 ? pos.current_price.toFixed(pos.symbol.startsWith('XAU') ? 2 : pos.symbol.startsWith('BTC') || pos.symbol.startsWith('ETH') ? 2 : 4) : '—'}</div>
+                      <div className="font-mono font-bold">{pos.current_price > 0 ? pos.current_price.toFixed(pricePrecision(pos.symbol)) : '—'}</div>
                     </div>
                     <div>
                       <div className="text-xs text-slate-500 mb-0.5">Stop Loss</div>
-                      <div className="font-mono font-bold text-rose-400">{pos.stop_loss.toFixed(pos.symbol.startsWith('XAU') ? 2 : pos.symbol.startsWith('BTC') || pos.symbol.startsWith('ETH') ? 2 : 4)}</div>
+                      <div className="font-mono font-bold text-rose-400">{pos.stop_loss.toFixed(pricePrecision(pos.symbol))}</div>
                       <div className="text-[10px] text-slate-600">{slPct.toFixed(2)}%</div>
                     </div>
                     <div>
                       <div className="text-xs text-slate-500 mb-0.5">Take Profit</div>
-                      <div className="font-mono font-bold text-emerald-400">{pos.take_profit.toFixed(pos.symbol.startsWith('XAU') ? 2 : pos.symbol.startsWith('BTC') || pos.symbol.startsWith('ETH') ? 2 : 4)}</div>
+                      <div className="font-mono font-bold text-emerald-400">{pos.take_profit.toFixed(pricePrecision(pos.symbol))}</div>
                       <div className="text-[10px] text-slate-600">{tpPct.toFixed(2)}%</div>
                     </div>
                     <div>
@@ -278,8 +285,8 @@ const TradeLog: React.FC = () => {
                       {trade.signal_type}
                     </span>
                   </td>
-                  <td className="px-6 py-4 font-mono text-sm">{trade.entry_price.toFixed(4)}</td>
-                  <td className="px-6 py-4 font-mono text-sm">{trade.exit_price.toFixed(4)}</td>
+                  <td className="px-6 py-4 font-mono text-sm">{trade.entry_price.toFixed(pricePrecision(trade.symbol))}</td>
+                  <td className="px-6 py-4 font-mono text-sm">{trade.exit_price.toFixed(pricePrecision(trade.symbol))}</td>
                   <td className="px-6 py-4 text-xs text-slate-400 whitespace-nowrap">{formatTime(trade.entry_time)}</td>
                   <td className="px-6 py-4 text-xs text-slate-400 whitespace-nowrap">{formatTime(trade.exit_time)}</td>
                   <td className="px-6 py-4">

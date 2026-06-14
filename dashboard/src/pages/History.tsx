@@ -3,6 +3,11 @@ import { useQuery } from '@tanstack/react-query';
 import { History as HistoryIcon, TrendingUp, TrendingDown, Activity, BarChart3, DollarSign, Percent } from 'lucide-react';
 import { tradingApi } from '../services/api';
 
+// Mirror of api/main.py FOREX_PRECISION for frontend price display
+const FOREX_PRECISION: Record<string, number> = {
+  EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
+};
+
 const History: React.FC = () => {
   const [resultFilter, setResultFilter] = useState<string>('ALL');
   const [symbolFilter, setSymbolFilter] = useState<string>('ALL');
@@ -147,8 +152,8 @@ const History: React.FC = () => {
                       {trade.signal_type}
                     </span>
                   </td>
-                  <td className="px-6 py-4 font-mono text-sm">{trade.entry_price.toFixed(4)}</td>
-                  <td className="px-6 py-4 font-mono text-sm">{trade.exit_price.toFixed(4)}</td>
+                  <td className="px-6 py-4 font-mono text-sm">{trade.entry_price.toFixed(FOREX_PRECISION[trade.symbol] ?? 2)}</td>
+                  <td className="px-6 py-4 font-mono text-sm">{trade.exit_price.toFixed(FOREX_PRECISION[trade.symbol] ?? 2)}</td>
                   <td className="px-6 py-4 text-xs text-slate-400 whitespace-nowrap">{formatTime(trade.entry_time)}</td>
                   <td className="px-6 py-4 text-xs text-slate-400 whitespace-nowrap">{formatTime(trade.exit_time)}</td>
                   <td className="px-6 py-4">
