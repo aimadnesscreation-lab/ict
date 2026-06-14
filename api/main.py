@@ -180,16 +180,28 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 if symbol == "BTCUSDT":
                     df_15m_backtest = df_15m
 
-                    # Compute medium-term bias from 15m data (no extra API call)
-                    # 48 five-minute candles → 16 fifteen-minute candles ≈ 4 hours
-                    # Enough for swing detection without hitting CoinGecko rate limits
+                    # Compute HTF bias — try CoinGecko days=7 first (~42 candles at ~4H intervals),
+                    # fall back to 15m data (~16 candles) if the API call fails.
                     try:
-                        # Run swing detection on a copy to avoid mutating the original
-                        df_bias = ict_ms.detect_swings(df_15m.clone())
-                        htf_bias = determine_bias_from_swings(df_bias)
-                        logger.info(f"4H bias: {htf_bias.upper()} (from BTC 15m, {len(df_bias)} candles)")
+                        df_htf = await collector.fetch_historical(symbol, "1h", 168)
+                        if not df_htf.is_empty() and len(df_htf) >= 8:
+                            df_htf = ict_ms.detect_swings(df_htf)
+                            htf_bias = determine_bias_from_swings(df_htf)
+                            logger.info(f"HTF bias: {htf_bias.upper()} (from CoinGecko days=7, {len(df_htf)} candles)")
+                        else:
+                            # Fallback: use 15m data
+                            logger.warning(f"HTF bias: CoinGecko days=7 returned {len(df_htf) if not df_htf.is_empty() else 0} candles, falling back to 15m")
+                            df_fb = ict_ms.detect_swings(df_15m.clone())
+                            htf_bias = determine_bias_from_swings(df_fb)
+                            logger.info(f"HTF bias: {htf_bias.upper()} (15m fallback, {len(df_fb)} candles)")
                     except Exception as e:
-                        logger.warning(f"Bias detection failed: {e}")
+                        logger.warning(f"HTF bias: CoinGecko days=7 failed ({e}), falling back to 15m")
+                        try:
+                            df_fb = ict_ms.detect_swings(df_15m.clone())
+                            htf_bias = determine_bias_from_swings(df_fb)
+                            logger.info(f"HTF bias: {htf_bias.upper()} (15m fallback after error, {len(df_fb)} candles)")
+                        except Exception as e2:
+                            logger.warning(f"HTF bias: 15m fallback also failed: {e2}")
 
                 # Analyze both timeframes
                 for tf, df in [("5m", df_5m), ("15m", df_15m)]:
