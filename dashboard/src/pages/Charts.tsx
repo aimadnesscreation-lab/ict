@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import ICTChart from '../components/ICTChart';
+import EMABiasChart from '../components/EMABiasChart';
 import { useQuery } from '@tanstack/react-query';
 import { tradingApi } from '../services/api';
 
@@ -85,6 +86,11 @@ const Charts: React.FC = () => {
           <ICTChart data={displayData} />
         )}
       </div>
+
+      {/* EMA Bias Section (only for 1h timeframe where we have enough data) */}
+      {isCrypto && timeframe === '1h' && displayData.length >= 26 && (
+        <EMABiasChart data={displayData} />
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div className="bg-slate-900 p-4 border border-slate-800 rounded-xl">
