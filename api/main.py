@@ -36,6 +36,21 @@ _performance_cache: Dict = {}
 _news_cache: List[Dict] = []
 _news_cache_time: Optional[datetime] = None
 
+# Health / debugging state
+_health: Dict = {
+    "status": "starting",
+    "htf_bias": "neutral",
+    "last_cycle_time": None,
+    "cycle_count": 0,
+    "last_error_time": None,
+    "last_error_message": None,
+    "total_signals_generated": 0,
+    "total_signals_kept": 0,
+    "total_trades_executed": 0,
+    "started_at": datetime.utcnow().isoformat() + "Z",
+    "data_sources": [],
+}
+
 risk_manager = RiskManager(
     max_risk_per_trade_pct=1.0,
     max_daily_loss_pct=3.0,
@@ -87,6 +102,12 @@ async def lifespan(app: FastAPI):
     news_task = asyncio.create_task(_news_worker())
     _background_tasks.append(news_task)
 
+    # Signal health tracking
+    _health["data_sources"] = ["CoinGecko (crypto)"]
+    if TWELVEDATA_API_KEY:
+        _health["data_sources"].append("Twelve Data (forex)")
+    _health["status"] = "running"
+
     logger.info(f"Started {len(_background_tasks)} background workers.")
     yield
 
@@ -137,7 +158,7 @@ async def _signal_worker(collector: CoinGeckoCollector):
     Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
     run full ICT detection pipeline, generate signals with confluence scoring.
     """
-    global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache
+    global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache, _health
 
     ict_ms = MarketStructure(n=3)       # Swing N=3 per ict.md
     ict_fvg = FVGDetector()
@@ -260,6 +281,9 @@ async def _signal_worker(collector: CoinGeckoCollector):
 
                     all_signals.append(signal)
 
+            # Track generated count BEFORE filtering for health metrics
+            _generated_count = len(all_signals)
+
             # ── Filter signals that don't align with 4H bias ───────────
             if htf_bias != "neutral":
                 filtered = []
@@ -284,6 +308,10 @@ async def _signal_worker(collector: CoinGeckoCollector):
                     f"until a clear direction forms"
                 )
                 all_signals = []
+
+            # ── Update health metrics with generated vs kept counts ────
+            _health["total_signals_generated"] = _health.get("total_signals_generated", 0) + _generated_count
+            _health["total_signals_kept"] = _health.get("total_signals_kept", 0) + len(all_signals)
 
             # Assign IDs and store
             for s in all_signals:
@@ -361,6 +389,13 @@ async def _signal_worker(collector: CoinGeckoCollector):
                                 f"{stype} (score={score_val}) — outside kill zone"
                             )
 
+            # Update health tracking
+            _health["htf_bias"] = htf_bias
+            _health["last_cycle_time"] = datetime.utcnow().isoformat() + "Z"
+            _health["cycle_count"] = _health.get("cycle_count", 0) + 1
+            _health["total_trades_executed"] = len(_recent_trades)
+            _health["status"] = "running"
+
             logger.info(
                 f"Signal cycle complete: {len(all_signals)} signals across "
                 f"{len(TIMEFRAMES)} timeframes, {len(_recent_trades)} trades."
@@ -368,6 +403,9 @@ async def _signal_worker(collector: CoinGeckoCollector):
 
         except Exception as e:
             logger.warning(f"Signal worker error: {e}. Retrying in 60s...")
+            _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
+            _health["last_error_message"] = str(e)
+            _health["status"] = "error"
 
         await asyncio.sleep(CYCLE_INTERVAL)
 
@@ -658,6 +696,41 @@ async def get_demo_account():
             if _performance_cache else [],
     }
     return summary
+
+
+# ─── Health / Debug ──────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def get_health():
+    """
+    Return system health status for debugging.
+    Exposes HTF bias, last cycle time, error counts, and worker status.
+    """
+    now = datetime.utcnow().isoformat() + "Z"
+    uptime = now
+    if _health.get("started_at"):
+        started = datetime.fromisoformat(_health["started_at"].replace("Z", ""))
+        uptime_secs = (datetime.utcnow() - started).total_seconds()
+        uptime = f"{uptime_secs / 60:.0f}m {uptime_secs % 60:.0f}s"
+
+    return {
+        "status": _health.get("status", "unknown"),
+        "uptime": uptime,
+        "started_at": _health.get("started_at"),
+        "last_cycle_time": _health.get("last_cycle_time"),
+        "cycle_count": _health.get("cycle_count", 0),
+        "htf_bias": _health.get("htf_bias", "neutral"),
+        "total_signals_generated": _health.get("total_signals_generated", 0),
+        "total_signals_kept": _health.get("total_signals_kept", 0),
+        "total_trades_executed": _health.get("total_trades_executed", 0),
+        "last_error_time": _health.get("last_error_time"),
+        "last_error_message": _health.get("last_error_message"),
+        "data_sources": _health.get("data_sources", []),
+        "btc_price": _latest_prices.get("BTCUSDT", 0),
+        "eth_price": _latest_prices.get("ETHUSDT", 0),
+        "forex_prices_available": {s: _latest_prices.get(s, 0) for s in FOREX_SYMBOLS},
+        "twelve_data_connected": TWELVEDATA_API_KEY and bool(_latest_ticks),
+    }
 
 
 # ─── Risk (real, from RiskManager) ───────────────────────────────────
