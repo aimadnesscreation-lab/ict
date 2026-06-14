@@ -132,21 +132,6 @@ async def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
     return resampled
 
 
-async def _resample_5m_to_4h(df: pl.DataFrame) -> pl.DataFrame:
-    """Resample 5m candles to 4H locally (48 five-minute candles = 1 four-hour candle)."""
-    df = df.sort("timestamp")
-    df = df.with_row_index()
-    df = df.with_columns((pl.col("index") // 48).alias("_group"))
-    resampled = df.group_by("_group", maintain_order=True).agg([
-        pl.col("timestamp").first().alias("timestamp"),
-        pl.col("open").first().alias("open"),
-        pl.col("high").max().alias("high"),
-        pl.col("low").min().alias("low"),
-        pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume"),
-    ]).drop("_group").sort("timestamp")
-    return resampled
-
 async def _signal_worker(collector: CoinGeckoCollector):
     """
     Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
@@ -195,12 +180,17 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 if symbol == "BTCUSDT":
                     df_15m_backtest = df_15m
 
-                    # Compute 4H bias from BTC 5m data (no extra API call)
+                    # Compute 4H bias from CoinGecko data using days=7 (~42 candles at ~4H intervals)
+                    # The free tier caps responses at ~48 candles, so resampling 5m→4H gives only 1 candle.
+                    # Fetching days=7 returns enough candles for proper swing detection.
                     try:
-                        df_4h_bias = await _resample_5m_to_4h(df_5m)
-                        df_4h_bias = ict_ms.detect_swings(df_4h_bias)
-                        htf_bias = determine_bias_from_swings(df_4h_bias)
-                        logger.info(f"4H bias: {htf_bias.upper()} (from BTC 5m→4H)")
+                        df_4h_bias = await collector.fetch_historical(symbol, "1h", 168)
+                        if not df_4h_bias.is_empty() and len(df_4h_bias) >= 3:
+                            df_4h_bias = ict_ms.detect_swings(df_4h_bias)
+                            htf_bias = determine_bias_from_swings(df_4h_bias)
+                            logger.info(f"4H bias: {htf_bias.upper()} (from CoinGecko days=7, {len(df_4h_bias)} candles, ~4H intervals)")
+                        else:
+                            logger.warning(f"4H bias: insufficient data ({len(df_4h_bias)} candles), using fallback")
                     except Exception as e:
                         logger.warning(f"4H bias detection failed: {e}")
 
