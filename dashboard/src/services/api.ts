@@ -16,6 +16,9 @@ export interface Signal {
   symbol: string;
   signal_type: 'STRONG_BUY' | 'BUY' | 'NEUTRAL' | 'SELL' | 'STRONG_SELL';
   score: number;
+  bullish_score: number;
+  bearish_score: number;
+  net_score: number;
   price: number;
   timeframe: string;
   bias: 'bullish' | 'bearish' | 'neutral';
@@ -23,13 +26,24 @@ export interface Signal {
   confidence: number;
   meta_data: {
     mss: boolean;
+    mss_type: string | null;
     sweep: boolean;
+    sweep_type: string | null;
+    bullish_fvg: boolean;
+    bearish_fvg: boolean;
+    bullish_ob: boolean;
+    bearish_ob: boolean;
     fvg: boolean;
     ob: boolean;
     discount: boolean;
     ote: boolean;
     bias: string;
     news_sentiment: number;
+    in_kill_zone: boolean;
+    htf_bias: string;
+    htf_aligned: boolean;
+    active_sessions: string[];
+    active_kill_zones: string[];
   };
 }
 
@@ -141,25 +155,44 @@ function generateMockSignals(count = 10): Signal[] {
   return Array.from({ length: count }, (_, i) => {
     const sym = symbols[Math.floor(Math.random() * symbols.length)];
     const bp = basePrices[sym] || 100;
+    const score = Math.floor(Math.random() * 85) + 10;
+    const bias = (['bullish', 'bearish', 'neutral'] as const)[Math.floor(Math.random() * 3)];
+    const isBullish = Math.random() > 0.5;
+    const bullScore = isBullish ? score : Math.floor(Math.random() * 30);
+    const bearScore = isBullish ? Math.floor(Math.random() * 30) : score;
     return {
       id: i + 1,
       symbol: sym,
       signal_type: weightedPick(),
-      score: Math.floor(Math.random() * 85) + 10,
+      score,
+      bullish_score: bullScore,
+      bearish_score: bearScore,
+      net_score: bullScore - bearScore,
       price: Math.round((bp + (Math.random() - 0.5) * 10) * 10000) / 10000,
       timestamp: new Date(Date.now() - Math.random() * 86400000).toISOString(),
       confidence: Math.round((Math.random() * 0.48 + 0.5) * 100) / 100,
       timeframe: ['5m', '15m', '1h'][Math.floor(Math.random() * 3)],
-      bias: (['bullish', 'bearish', 'neutral'] as const)[Math.floor(Math.random() * 3)],
+      bias,
       meta_data: {
         mss: Math.random() > 0.4,
+        mss_type: Math.random() > 0.5 ? (Math.random() > 0.5 ? 'BULLISH_MSS' : 'BEARISH_MSS') : null,
         sweep: Math.random() > 0.5,
+        sweep_type: Math.random() > 0.5 ? (Math.random() > 0.5 ? 'BULLISH' : 'BEARISH') : null,
+        bullish_fvg: Math.random() > 0.6,
+        bearish_fvg: Math.random() > 0.7,
+        bullish_ob: Math.random() > 0.65,
+        bearish_ob: Math.random() > 0.7,
         fvg: Math.random() > 0.3,
         ob: Math.random() > 0.5,
         discount: Math.random() > 0.5,
         ote: Math.random() > 0.6,
-        bias: ['bullish', 'bearish', 'neutral'][Math.floor(Math.random() * 3)],
+        bias: bias,
         news_sentiment: Math.round((Math.random() * 1.6 - 0.8) * 100) / 100,
+        in_kill_zone: Math.random() > 0.6,
+        htf_bias: bias,
+        htf_aligned: true,
+        active_sessions: ['london', 'new_york'].filter(() => Math.random() > 0.5),
+        active_kill_zones: ['london_kill_zone'].filter(() => Math.random() > 0.7),
       },
     };
   });

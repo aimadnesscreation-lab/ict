@@ -64,8 +64,14 @@ class MarketStructure:
         # For simplicity, we track if the current candle is the *first* break after a sweep
         # Real implementation would track state, here we provide the indicators
         
+        # Bullish MSS: close > previous swing high (breaks structure upward)
+        is_bullish_mss = is_bullish_bos & (pl.col("close") > pl.col("last_swing_high").shift(2))
+        # Bearish MSS: close < previous swing low (breaks structure downward)
+        is_bearish_mss = is_bearish_bos & (pl.col("close") < pl.col("last_swing_low").shift(2))
+
         return df.with_columns([
             pl.when(is_bullish_bos).then(pl.lit("BULLISH")).when(is_bearish_bos).then(pl.lit("BEARISH")).otherwise(None).alias("bos"),
-            # MSS is often a BOS that changes trend bias, for now we mark significant breaks
-            pl.when(is_bullish_bos & (pl.col("close") > pl.col("last_swing_high").shift(2))).then(pl.lit("BULLISH_MSS")).otherwise(None).alias("mss")
+            pl.when(is_bullish_mss).then(pl.lit("BULLISH_MSS"))
+              .when(is_bearish_mss).then(pl.lit("BEARISH_MSS"))
+              .otherwise(None).alias("mss"),
         ])

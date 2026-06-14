@@ -216,15 +216,22 @@ async def _signal_worker(collector: CoinGeckoCollector):
                     df = ict_pd.compute_zones(df)
                     df = ict_breaker.detect_breaker_blocks(df)
 
-                    # Check detection flags
-                    has_mss = "mss" in df.columns and df["mss"].is_not_null().any()
-                    has_sweep = ("liquidity_sweep_type" in df.columns
-                                 and df["liquidity_sweep_type"].is_not_null().any())
+                    # Check directional detection flags
+                    mss_type = None
+                    if "mss" in df.columns:
+                        latest_mss = df["mss"].drop_nulls().tail(1)
+                        if len(latest_mss) > 0:
+                            mss_type = latest_mss[0]
+                    sweep_type = None
+                    if "liquidity_sweep_type" in df.columns:
+                        latest_sweep = df["liquidity_sweep_type"].drop_nulls().tail(1)
+                        if len(latest_sweep) > 0:
+                            sweep_type = latest_sweep[0]
 
-                    # Generate signal with full confluence scoring
+                    # Generate signal with dual-scoring
                     # 4H bias is passed so the engine knows the HTF direction
                     signal = signal_engine.generate_signal(
-                        df, mss=has_mss, sweep=has_sweep,
+                        df, mss_type=mss_type, sweep_type=sweep_type,
                         news_sentiment=0.0, timeframe=tf,
                         htf_bias=htf_bias,
                     )
@@ -432,6 +439,9 @@ def format_signal(s: Dict) -> Dict:
         "symbol": s.get("symbol", "BTCUSDT"),
         "signal_type": s.get("signal_type", "NEUTRAL"),
         "score": s.get("score", 0),
+        "bullish_score": s.get("bullish_score", 0),
+        "bearish_score": s.get("bearish_score", 0),
+        "net_score": s.get("net_score", 0),
         "price": s.get("price", 0),
         "timeframe": s.get("timeframe", "1h"),
         "bias": s.get("bias", "neutral"),
@@ -444,9 +454,15 @@ def format_signal(s: Dict) -> Dict:
         "confidence": s.get("confidence", 0.5),
         "meta_data": {
             "mss": details.get("mss", False),
+            "mss_type": details.get("mss_type"),
             "sweep": details.get("sweep", False),
-            "fvg": details.get("fvg", False),
-            "ob": details.get("ob", False),
+            "sweep_type": details.get("sweep_type"),
+            "bullish_fvg": details.get("bullish_fvg", False),
+            "bearish_fvg": details.get("bearish_fvg", False),
+            "bullish_ob": details.get("bullish_ob", False),
+            "bearish_ob": details.get("bearish_ob", False),
+            "fvg": details.get("fvg", False) or details.get("bullish_fvg", False) or details.get("bearish_fvg", False),
+            "ob": details.get("ob", False) or details.get("bullish_ob", False) or details.get("bearish_ob", False),
             "discount": details.get("discount", False),
             "ote": details.get("ote", False),
             "bias": details.get("bias", "neutral"),
