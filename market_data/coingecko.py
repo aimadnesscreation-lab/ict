@@ -29,7 +29,7 @@ class CoinGeckoCollector(BaseCollector):
         super().__init__(symbols, timeframes)
         self.base_url = "https://api.coingecko.com/api/v3"
         self._last_request_time = 0.0
-        self._min_interval = 6.0  # minimum seconds between requests (free tier: 10-30 calls/min)
+        self._min_interval = 15.0  # minimum seconds between requests (free tier conservative: ~4 calls/min)
 
     async def start(self):
         self.is_running = True

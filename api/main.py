@@ -843,9 +843,9 @@ async def _twelve_data_worker():
                         elif event == "heartbeat":
                             pass  # Server heartbeat, nothing needed
 
-                        # Refresh 24h stats from REST every 5 minutes
+                        # Refresh 24h stats from REST every 15 minutes (free tier rate limits)
                         now = datetime.utcnow()
-                        if (now - last_rest_fetch).total_seconds() >= 300:
+                        if (now - last_rest_fetch).total_seconds() >= 900:
                             await _fetch_all_forex_quotes()
                             last_rest_fetch = now
 
