@@ -66,17 +66,26 @@ class DemoAccount:
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
         self._daily_pnl = 0.0
+        self._last_trade_date = datetime.utcnow().date()
 
     # ── Public API ────────────────────────────────────────────────────
 
     def process_signals(self, signals: List[Dict], current_prices: Dict[str, float]) -> List[Dict]:
         """
         Main entry point — called every signal cycle.
-        1. Check open positions against current prices → close any that hit SL/TP
-        2. Open new positions for strong signals not already in a position
+        1. Reset daily P&L if a new UTC day has started
+        2. Check open positions against current prices → close any that hit SL/TP
+        3. Open new positions for strong signals not already in a position
 
         Returns the list of trades that were closed this cycle (for logging).
         """
+        # Reset daily P&L on UTC day change — prevents permanent lockout
+        today = datetime.utcnow().date()
+        if today != self._last_trade_date:
+            logger.info(f"Daily P&L reset: {self._daily_pnl:.2f} → 0.00 (new trading day)")
+            self._daily_pnl = 0.0
+            self._last_trade_date = today
+
         freshly_closed: List[Dict] = []
 
         # Step 1: Check existing positions
@@ -192,17 +201,17 @@ class DemoAccount:
         }
 
     def get_open_positions_list(self) -> List[Dict]:
-        """Return open positions in API-friendly format."""
+        """Return open positions in API-friendly format (raw prices, caller handles precision)."""
         return [
             {
                 "symbol": pos.symbol,
                 "side": pos.side,
                 "signal_type": pos.signal_type,
                 "entry_time": pos.entry_time.isoformat() if hasattr(pos.entry_time, "isoformat") else str(pos.entry_time),
-                "entry_price": round(pos.entry_price, 2),
+                "entry_price": round(pos.entry_price, 6),
                 "current_price": 0.0,  # caller should fill this
-                "stop_loss": round(pos.stop_loss, 2),
-                "take_profit": round(pos.take_profit, 2),
+                "stop_loss": round(pos.stop_loss, 6),
+                "take_profit": round(pos.take_profit, 6),
                 "quantity": round(pos.quantity, 6),
                 "risk_amount": round(pos.risk_amount, 2),
                 "unrealized_pnl": 0.0,  # caller should fill
@@ -233,6 +242,11 @@ class DemoAccount:
             }
             for t in trades
         ]
+
+    @property
+    def daily_loss(self) -> float:
+        """Return the running daily loss amount (positive = losing money, 0 = breakeven/profitable)."""
+        return -self._daily_pnl if self._daily_pnl < 0 else 0.0
 
     def get_account_summary(self) -> Dict:
         """Return account overview for the dashboard."""

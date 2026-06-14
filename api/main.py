@@ -307,7 +307,7 @@ async def _signal_worker(collector: CoinGeckoCollector):
 
                 # Check risk limits before processing signals
                 risk_manager.update_state(
-                    daily_pnl=-sum(t.get("profit", 0) for t in _recent_trades) if _recent_trades else 0,
+                    daily_pnl=demo_account.daily_loss,
                     open_positions=len(demo_account.open_positions),
                 )
                 
@@ -322,8 +322,13 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 open_positions = demo_account.get_open_positions_list()
                 for pos_data in open_positions:
                     sym = pos_data["symbol"]
+                    prec = _price_precision(sym)
                     cur_price = _latest_prices.get(sym, 0.0)
-                    pos_data["current_price"] = round(cur_price, 2) if cur_price > 0 else 0.0
+                    pos_data["current_price"] = round(cur_price, prec) if cur_price > 0 else 0.0
+                    # Re-round entry/SL/TP with symbol-appropriate precision
+                    pos_data["entry_price"] = round(pos_data["entry_price"], prec)
+                    pos_data["stop_loss"] = round(pos_data["stop_loss"], prec)
+                    pos_data["take_profit"] = round(pos_data["take_profit"], prec)
                     if cur_price > 0 and pos_data["entry_price"] > 0:
                         if pos_data["side"] == "LONG":
                             pos_data["unrealized_pnl"] = round((cur_price - pos_data["entry_price"]) * pos_data["quantity"], 2)
@@ -699,6 +704,14 @@ TWELVEDATA_REST_URL = "https://api.twelvedata.com/quote"
 
 FOREX_BASE_PRICES = {"EURUSD": 1.1042, "GBPUSD": 1.2654, "XAUUSD": 2342.10, "USDJPY": 151.24}  # fallback seed prices (overwritten by Twelve Data)
 FOREX_PRECISION = {"EURUSD": 4, "GBPUSD": 4, "XAUUSD": 2, "USDJPY": 3}  # decimal places per symbol
+
+# Default precision for symbols not in FOREX_PRECISION (crypto)
+DEFAULT_PRECISION = 2
+
+
+def _price_precision(symbol: str) -> int:
+    """Return appropriate decimal places for a given symbol's price display."""
+    return FOREX_PRECISION.get(symbol, DEFAULT_PRECISION)
 
 # Shared in-memory state: latest price for each symbol
 _latest_prices: Dict[str, float] = {
