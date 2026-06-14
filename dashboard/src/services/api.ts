@@ -58,6 +58,7 @@ export interface Trade {
   profit: number;
   rr: number;
   result: 'WIN' | 'LOSS' | 'BREAK_EVEN';
+  exit_reason: string;
 }
 
 export interface PerformanceMetrics {
@@ -236,6 +237,7 @@ function generateMockTrades(count = 20): Trade[] {
       profit: Math.round(profit * 100) / 100,
       rr: result === 'BREAK_EVEN' ? 0 : rr,
       result,
+      exit_reason: result === 'WIN' ? 'TAKE_PROFIT' : result === 'LOSS' ? 'STOP_LOSS' : 'MANUAL',
     };
   }).sort((a, b) => new Date(b.exit_time).getTime() - new Date(a.exit_time).getTime());
 }

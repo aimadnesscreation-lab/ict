@@ -163,11 +163,13 @@ const TradeLog: React.FC = () => {
                         {isLong ? 'LONG' : 'SHORT'}
                       </span>
                     </div>
-                    <div className={`text-right ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    <div className={`text-right ${pos.current_price > 0 ? (isUp ? 'text-emerald-400' : 'text-rose-400') : 'text-slate-500'}`}>
                       <div className="text-lg font-bold font-mono">
-                        ${formatCurrency(pos.unrealized_pnl)}
+                        {pos.current_price > 0 ? `$${formatCurrency(pos.unrealized_pnl)}` : '—'}
                       </div>
-                      <div className="text-[10px] uppercase tracking-wide">Unrealized P&L</div>
+                      <div className="text-[10px] uppercase tracking-wide">
+                        {pos.current_price > 0 ? 'Unrealized P&L' : 'Awaiting price'}
+                      </div>
                     </div>
                   </div>
 
@@ -255,13 +257,14 @@ const TradeLog: React.FC = () => {
                 </th>
                 <th className="px-6 py-3 font-medium">R:R</th>
                 <th className="px-6 py-3 font-medium">Result</th>
+                <th className="px-6 py-3 font-medium">Exit</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800">
               {isLoading ? (
                 <tr><td colSpan={9} className="px-6 py-12 text-center text-slate-500">Loading trade history...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={9} className="px-6 py-12 text-center text-slate-500">
+                <tr><td colSpan={10} className="px-6 py-12 text-center text-slate-500">
                   {trades.length === 0 ? 'No trades yet. The demo account will start trading when strong signals are generated inside a kill zone.' : 'No trades match your filters.'}
                 </td></tr>
               ) : filtered.map(trade => (
@@ -294,6 +297,9 @@ const TradeLog: React.FC = () => {
                       {trade.result === 'WIN' ? '✅ WIN' : trade.result === 'LOSS' ? '❌ LOSS' : '➖ BE'}
                     </span>
                   </td>
+                  <td className="px-6 py-4">
+                    <ExitReasonBadge reason={trade.exit_reason} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -324,6 +330,12 @@ const TradeLog: React.FC = () => {
       )}
     </div>
   );
+};
+
+const ExitReasonBadge = ({ reason }: { reason: string }) => {
+  if (reason === 'TAKE_PROFIT') return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">TP</span>;
+  if (reason === 'STOP_LOSS') return <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400">SL</span>;
+  return <span className="text-[10px] text-slate-600">—</span>;
 };
 
 export default TradeLog;
