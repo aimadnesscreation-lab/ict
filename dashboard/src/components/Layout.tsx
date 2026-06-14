@@ -73,9 +73,9 @@ const Layout: React.FC<LayoutProps> = ({ children, activePage, onPageChange }) =
           />
           <NavItem 
             icon={<History size={20} />} 
-            label="Trade History" 
-            active={activePage === 'History'} 
-            onClick={() => onPageChange('History')} 
+            label="Trade Log" 
+            active={activePage === 'TradeLog'} 
+            onClick={() => onPageChange('TradeLog')} 
           />
           <NavItem 
             icon={<ShieldAlert size={20} />} 

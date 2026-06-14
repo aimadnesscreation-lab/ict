@@ -4,7 +4,7 @@ import Layout from './components/Layout';
 import Overview from './pages/Overview';
 import Signals from './pages/Signals';
 import Charts from './pages/Charts';
-import History from './pages/History';
+import TradeLog from './pages/TradeLog';
 import RiskCenter from './pages/RiskCenter';
 import Settings from './pages/Settings';
 
@@ -18,7 +18,7 @@ function App() {
       case 'Overview': return <Overview />;
       case 'Signals': return <Signals />;
       case 'Charts': return <Charts />;
-      case 'History': return <History />;
+      case 'TradeLog': return <TradeLog />;
       case 'Risk': return <RiskCenter />;
       case 'Settings': return <Settings />;
       default:

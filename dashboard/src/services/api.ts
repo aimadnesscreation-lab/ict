@@ -56,6 +56,37 @@ export interface PerformanceMetrics {
   avg_rr: number;
 }
 
+export interface OpenPosition {
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  signal_type: string;
+  entry_time: string;
+  entry_price: number;
+  current_price: number;
+  stop_loss: number;
+  take_profit: number;
+  quantity: number;
+  risk_amount: number;
+  unrealized_pnl: number;
+}
+
+export interface DemoAccountData {
+  balance: number;
+  initial_balance: number;
+  total_profit: number;
+  total_trades: number;
+  win_rate: number;
+  profit_factor: number;
+  max_drawdown: number;
+  avg_rr: number;
+  total_wins: number;
+  total_losses: number;
+  peak_balance: number;
+  current_drawdown_pct: number;
+  open_positions_count: number;
+  open_positions: OpenPosition[];
+}
+
 export interface RiskStatus {
   max_risk_per_trade_pct: number;
   max_daily_loss_pct: number;
@@ -284,6 +315,31 @@ export const tradingApi = {
       },
       generateMockPerformance(),
       'getPerformance',
+    ),
+
+  getDemoAccount: (): Promise<DemoAccountData> =>
+    safeRequest(
+      async () => {
+        const res = await api.get('/demo/account');
+        return res.data;
+      },
+      {
+        balance: 10000,
+        initial_balance: 10000,
+        total_profit: 0,
+        total_trades: 0,
+        win_rate: 0,
+        profit_factor: 0,
+        max_drawdown: 0,
+        avg_rr: 0,
+        total_wins: 0,
+        total_losses: 0,
+        peak_balance: 10000,
+        current_drawdown_pct: 0,
+        open_positions_count: 0,
+        open_positions: [],
+      },
+      'getDemoAccount',
     ),
 
   getRiskStatus: (): Promise<RiskStatus> =>
