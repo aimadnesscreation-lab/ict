@@ -54,14 +54,18 @@ class ClosedTrade:
 
 
 class DemoAccount:
-    def __init__(self, initial_balance: float = 10_000.0, risk_per_trade_pct: float = 1.0):
+    def __init__(self, initial_balance: float = 10_000.0, risk_per_trade_pct: float = 1.0,
+                 max_daily_loss_pct: float = 3.0, max_open_positions: int = 3):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
         self.risk_per_trade_pct = risk_per_trade_pct
+        self.max_daily_loss_pct = max_daily_loss_pct
+        self.max_open_positions = max_open_positions
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
+        self._daily_pnl = 0.0
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -101,6 +105,17 @@ class DemoAccount:
 
             # Skip if already in a position for this symbol
             if symbol in self.open_positions:
+                continue
+
+            # Risk limit checks
+            # 1. Max open positions
+            if len(self.open_positions) >= self.max_open_positions:
+                logger.info(f"Risk limit: max {self.max_open_positions} open positions reached, skipping {symbol} {signal_type}")
+                continue
+
+            # 2. Max daily loss
+            if self._daily_pnl <= -(self.initial_balance * self.max_daily_loss_pct / 100):
+                logger.warning(f"Risk limit: daily loss of {self._daily_pnl:.2f} exceeds {self.max_daily_loss_pct}% cap, no more trades today")
                 continue
 
             # Determine side
@@ -311,8 +326,9 @@ class DemoAccount:
 
         result = "WIN" if profit > 0 else ("LOSS" if profit < 0 else "BREAK_EVEN")
 
-        # Update balance
+        # Update balance and daily P&L
         self.balance += profit
+        self._daily_pnl += profit
         if self.balance > self._peak_balance:
             self._peak_balance = self.balance
 

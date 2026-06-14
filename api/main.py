@@ -162,7 +162,9 @@ async def _signal_worker(collector: CoinGeckoCollector):
     ict_breaker = BreakerBlockDetector()
     signal_engine = SignalEngine()
     backtester = BacktestEngine(initial_capital=10000.0, rr_target=2.0, rr_stop=1.0)
-    demo_account = DemoAccount(initial_balance=10_000.0, risk_per_trade_pct=1.0)
+    demo_account = DemoAccount(initial_balance=10_000.0, risk_per_trade_pct=1.0,
+                                max_daily_loss_pct=risk_manager.max_daily_loss_pct,
+                                max_open_positions=risk_manager.max_open_positions)
     # Timeframes and symbols
     TIMEFRAMES = ["5m", "15m"]
     SIGNAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -295,6 +297,12 @@ async def _signal_worker(collector: CoinGeckoCollector):
                         if s.get("symbol") == symbol and s.get("price", 0) > 0:
                             current_prices[symbol] = s["price"]
 
+                # Check risk limits before processing signals
+                risk_manager.update_state(
+                    daily_pnl=-sum(t.get("profit", 0) for t in _recent_trades) if _recent_trades else 0,
+                    open_positions=len(demo_account.open_positions),
+                )
+                
                 # Process signals through the demo account
                 demo_account.process_signals(all_signals, current_prices)
 
@@ -302,7 +310,18 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 _recent_trades = demo_account.get_closed_trades_list(500)
                 perf = demo_account.get_performance()
                 perf["open_positions_count"] = len(demo_account.open_positions)
-                perf["open_positions"] = demo_account.get_open_positions_list()
+                # Enrich open positions with current prices for live P&L display
+                open_positions = demo_account.get_open_positions_list()
+                for pos_data in open_positions:
+                    sym = pos_data["symbol"]
+                    cur_price = _latest_prices.get(sym, 0.0)
+                    pos_data["current_price"] = round(cur_price, 2) if cur_price > 0 else 0.0
+                    if cur_price > 0 and pos_data["entry_price"] > 0:
+                        if pos_data["side"] == "LONG":
+                            pos_data["unrealized_pnl"] = round((cur_price - pos_data["entry_price"]) * pos_data["quantity"], 2)
+                        else:
+                            pos_data["unrealized_pnl"] = round((pos_data["entry_price"] - cur_price) * pos_data["quantity"], 2)
+                perf["open_positions"] = open_positions
                 _performance_cache = perf
 
                 open_count = len(demo_account.open_positions)
@@ -526,8 +545,7 @@ async def get_trades(
 
     # Assign sequential IDs
     result_trades = []
-    for i, t in enumerate(trades[:limit]):
-        result_trades.append({
+    for i, t in enumerate(trades[:limit]):            result_trades.append({
             "id": i + 1,
             "symbol": t.get("symbol", "BTCUSDT"),
             "signal_type": t.get("signal_type", "NEUTRAL"),
@@ -546,6 +564,7 @@ async def get_trades(
             "profit": t.get("profit", 0),
             "rr": t.get("rr", 0),
             "result": t.get("result", "BREAK_EVEN"),
+            "exit_reason": t.get("exit_reason", ""),
         })
 
     return result_trades
