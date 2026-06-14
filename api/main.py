@@ -26,7 +26,7 @@ from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
 from discord.bot import DiscordBot
 from demo_account import DemoAccount
-from signal_engine.engine import SignalEngine, determine_bias_from_swings
+from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
 
 # ── App state ─────────────────────────────────────────────────────────
 _signal_id_counter = 0
@@ -201,14 +201,25 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 if symbol == "BTCUSDT":
                     df_15m_backtest = df_15m
 
-                    # Compute HTF bias — try CoinGecko days=7 first (~42 candles at ~4H intervals),
-                    # fall back to 15m data (~16 candles) if the API call fails.
+                    # Compute HTF bias — use EMA crossover as primary method (catches trends
+                    # that strict HH/HL swing detection misses), fall back to swings then 15m.
                     try:
                         df_htf = await collector.fetch_historical(symbol, "1h", 168)
-                        if not df_htf.is_empty() and len(df_htf) >= 8:
+                        if not df_htf.is_empty() and len(df_htf) >= 26:
+                            # Primary: EMA crossover (EMA12 vs EMA26, 0.5% threshold)
+                            htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+                            # Secondary: swing structure for confirmation
+                            df_htf_swings = ict_ms.detect_swings(df_htf)
+                            swing_bias = determine_bias_from_swings(df_htf_swings)
+                            logger.info(
+                                f"HTF bias: {htf_bias.upper()} (EMA) — swings: {swing_bias.upper()}, "
+                                f"{len(df_htf)} candles from CoinGecko days=7"
+                            )
+                        elif not df_htf.is_empty() and len(df_htf) >= 8:
+                            # Not enough data for slow EMA, use swing detection
                             df_htf = ict_ms.detect_swings(df_htf)
                             htf_bias = determine_bias_from_swings(df_htf)
-                            logger.info(f"HTF bias: {htf_bias.upper()} (from CoinGecko days=7, {len(df_htf)} candles)")
+                            logger.info(f"HTF bias: {htf_bias.upper()} (swing fallback, {len(df_htf)} candles)")
                         else:
                             # Fallback: use 15m data
                             logger.warning(f"HTF bias: CoinGecko days=7 returned {len(df_htf) if not df_htf.is_empty() else 0} candles, falling back to 15m")

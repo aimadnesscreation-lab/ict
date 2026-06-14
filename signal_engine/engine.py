@@ -40,6 +40,52 @@ def determine_bias_from_swings(df: pl.DataFrame) -> str:
     return "neutral"
 
 
+def determine_bias_from_ema(df: pl.DataFrame, fast: int = 12, slow: int = 26, threshold_pct: float = 0.5) -> str:
+    """
+    Determine trend bias from EMA crossover on closing prices.
+
+    Uses fast-period and slow-period EMAs. If the fast EMA is above
+    the slow EMA by more than threshold_pct% of the price, bias is
+    bullish. If below by more than threshold_pct%, bearish.
+    Otherwise neutral (EMAs too close, no clear trend).
+
+    Args:
+        df: Candle data with a "close" column.
+        fast: Fast EMA period (default 12).
+        slow: Slow EMA period (default 26).
+        threshold_pct: Minimum % difference to call a trend (default 0.5%).
+
+    Returns:
+        "bullish", "bearish", or "neutral".
+    """
+    if "close" not in df.columns or len(df) < slow + 1:
+        return "neutral"
+
+    # Compute EMAs
+    df = df.with_columns([
+        pl.col("close").ewm_mean(span=fast, adjust=False).alias("ema_fast"),
+        pl.col("close").ewm_mean(span=slow, adjust=False).alias("ema_slow"),
+    ])
+
+    last = df.tail(1).to_dicts()[0]
+    ema_fast = last.get("ema_fast", 0)
+    ema_slow = last.get("ema_slow", 0)
+    current_price = last.get("close", 0)
+
+    if ema_fast == 0 or ema_slow == 0 or current_price == 0:
+        return "neutral"
+
+    # Compute difference as a % of current price
+    diff_pct = ((ema_fast - ema_slow) / current_price) * 100
+
+    if diff_pct > threshold_pct:
+        return "bullish"
+    elif diff_pct < -threshold_pct:
+        return "bearish"
+    else:
+        return "neutral"
+
+
 class SignalEngine:
     """
     Dual-scoring ICT confluence engine.
