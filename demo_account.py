@@ -70,17 +70,25 @@ class DemoAccount:
 
     # ── Public API ────────────────────────────────────────────────────
 
-    def process_signals(self, signals: List[Dict], current_prices: Dict[str, float]) -> List[Dict]:
+    def process_signals(self, signals: List[Dict], current_prices: Dict[str, float],
+                         current_time: Optional[datetime] = None) -> List[Dict]:
         """
         Main entry point — called every signal cycle.
         1. Reset daily P&L if a new UTC day has started
         2. Check open positions against current prices → close any that hit SL/TP
         3. Open new positions for strong signals not already in a position
 
+        Args:
+            signals: List of signal dicts
+            current_prices: Dict of {symbol: current_price}
+            current_time: Timestamp override for backtesting (uses datetime.utcnow() in live mode)
+
         Returns the list of trades that were closed this cycle (for logging).
         """
+        now = current_time if current_time is not None else datetime.utcnow()
+
         # Reset daily P&L on UTC day change — prevents permanent lockout
-        today = datetime.utcnow().date()
+        today = now.date()
         if today != self._last_trade_date:
             logger.info(f"Daily P&L reset: {self._daily_pnl:.2f} → 0.00 (new trading day)")
             self._daily_pnl = 0.0
@@ -95,7 +103,7 @@ class DemoAccount:
             if current_price is None:
                 continue
 
-            trade = self._check_position(pos, current_price)
+            trade = self._check_position(pos, current_price, now)
             if trade is not None:
                 freshly_closed.append(trade)
 
@@ -301,7 +309,8 @@ class DemoAccount:
         self.open_positions[symbol] = pos
         return pos
 
-    def _check_position(self, pos: OpenPosition, current_price: float) -> Optional[Dict]:
+    def _check_position(self, pos: OpenPosition, current_price: float,
+                          current_time: Optional[datetime] = None) -> Optional[Dict]:
         """
         Check if an open position hit SL or TP.
         Returns a dict if closed, None if still open.
@@ -346,12 +355,14 @@ class DemoAccount:
         if self.balance > self._peak_balance:
             self._peak_balance = self.balance
 
+        now = current_time if current_time is not None else datetime.utcnow()
+
         trade = ClosedTrade(
             symbol=pos.symbol,
             signal_type=pos.signal_type,
             side=pos.side,
             entry_time=pos.entry_time,
-            exit_time=datetime.utcnow(),
+            exit_time=now,
             entry_price=pos.entry_price,
             exit_price=exit_price,
             stop_loss=pos.stop_loss,

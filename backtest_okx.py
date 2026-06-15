@@ -325,8 +325,8 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 if reason is not None:
                     close_position(demo, pos, price, reason, current_ts)
 
-            # Step 2: Feed new signals to DemoAccount
-            demo.process_signals(aligned, {symbol: current_price})
+            # Step 2: Feed new signals to DemoAccount (pass candle timestamp for daily P&L reset)
+            demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
 
         i = chunk_end
 
