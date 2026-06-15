@@ -103,11 +103,10 @@ _background_tasks: List[asyncio.Task] = []
 async def lifespan(app: FastAPI):
     """Start all background workers on startup, cancel on shutdown."""
 
-    # Start Binance WS crypto worker (real-time 1m/5m/15m candles + ticker)
-    # No API key needed — replaces old CoinGecko polling
-    binance_task = asyncio.create_task(_binance_crypto_worker())
-    _background_tasks.append(binance_task)
-    logger.info("Binance crypto WS worker scheduled (real-time 1m/5m/15m).")
+    # Start crypto data worker (tries Binance WS, falls back to CoinGecko 60s polling)
+    crypto_task = asyncio.create_task(_crypto_data_worker())
+    _background_tasks.append(crypto_task)
+    logger.info("Crypto data worker scheduled (Binance WS / CoinGecko fallback).")
 
     # Start HTF bias worker (CoinGecko 1h data, updates every 15 min)
     bias_task = asyncio.create_task(_htf_bias_worker())
@@ -125,7 +124,7 @@ async def lifespan(app: FastAPI):
     _background_tasks.append(news_task)
 
     # Health tracking
-    _health["data_sources"] = ["Binance WS (crypto)"]
+    _health["data_sources"] = ["CoinGecko (crypto, 60s poll)"]
     if TWELVEDATA_API_KEY:
         _health["data_sources"].append("Twelve Data (forex)")
     _health["status"] = "running"
@@ -159,56 +158,37 @@ app.add_middleware(
 
 # ── Background workers ────────────────────────────────────────────────
 
-# ── Binance WebSocket Worker (real-time crypto data + signals) ─────────
+# ── Crypto Data Worker (Binance WS with CoinGecko fallback) ────────────
 
-# Binance combined streams URL — no API key needed
-BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
-
-
-def _binance_streams() -> str:
-    """Build the combined streams path for all symbols + timeframes + ticker."""
-    pairs = []
-    for sym in BINANCE_SYMBOLS:
-        s = sym.lower()
-        for tf in ["1m", "5m", "15m"]:
-            pairs.append(f"{s}@kline_{tf}")
-        pairs.append(f"{s}@ticker")
-    return "/".join(pairs)
+def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
+    idx = df.with_row_index().with_columns((pl.col("index") // 3).alias("_g"))
+    return idx.group_by("_g", maintain_order=True).agg([
+        pl.col("timestamp").first(), pl.col("open").first(),
+        pl.col("high").max(), pl.col("low").min(),
+        pl.col("close").last(), pl.col("volume").sum(),
+    ]).drop("_g").sort("timestamp")
 
 
 async def _backfill_crypto_buffers():
-    """Backfill 5m and 15m buffers from CoinGecko on startup."""
+    """Backfill 5m buffers from CoinGecko on startup, resample 15m."""
     global _candle_buffers
-    collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
+    cg = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
     for symbol in BINANCE_SYMBOLS:
-        df_5m = await collector.fetch_historical(symbol, "5m", 288)
+        df_5m = await cg.fetch_historical(symbol, "5m", 288)
         if not df_5m.is_empty():
-            buf = []
-            for row in df_5m.to_dicts():
-                buf.append({
-                    "timestamp": row["timestamp"],
-                    "open": row["open"],
-                    "high": row["high"],
-                    "low": row["low"],
-                    "close": row["close"],
-                    "volume": row["volume"],
-                })
+            buf = [{"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
+                    "low": r["low"], "close": r["close"], "volume": r["volume"]}
+                   for r in df_5m.to_dicts()]
             _candle_buffers.setdefault(symbol, {})["5m"] = buf
-            logger.info(f"[Binance] Backfilled {len(buf)} 5m candles for {symbol}")
-        _candle_buffers.setdefault(symbol, {}).setdefault("1m", [])
+            # Also build 15m from the same 5m data
+            df_15m = _resample_5m_to_15m(df_5m)
+            buf15 = [{"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
+                      "low": r["low"], "close": r["close"], "volume": r["volume"]}
+                     for r in df_15m.to_dicts()]
+            _candle_buffers[symbol]["15m"] = buf15
+            logger.info(f"[Crypto] Backfilled {len(buf)} 5m + {len(buf15)} 15m for {symbol}")
+        _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
         _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
-
-
-def _append_to_buffer(symbol: str, tf: str, candle: Dict):
-    buf = _candle_buffers.setdefault(symbol, {}).setdefault(tf, [])
-    # Replace if last candle has same timestamp (avoid duplicates from backfill/WS overlap)
-    if buf and buf[-1]["timestamp"] == candle["timestamp"]:
-        buf[-1] = candle
-    else:
-        buf.append(candle)
-    limit = BINANCE_BUFFER_LIMITS.get(tf, 288)
-    if len(buf) > limit:
-        buf[:] = buf[-limit:]
 
 
 def _buffer_to_df(symbol: str, tf: str) -> pl.DataFrame:
@@ -216,6 +196,17 @@ def _buffer_to_df(symbol: str, tf: str) -> pl.DataFrame:
     if len(buf) < 10:
         return pl.DataFrame()
     return pl.DataFrame(buf)
+
+
+def _append_to_buffer(symbol: str, tf: str, candle: Dict):
+    buf = _candle_buffers.setdefault(symbol, {}).setdefault(tf, [])
+    if buf and buf[-1]["timestamp"] == candle["timestamp"]:
+        buf[-1] = candle
+    else:
+        buf.append(candle)
+    limit = BINANCE_BUFFER_LIMITS.get(tf, 288)
+    if len(buf) > limit:
+        buf[:] = buf[-limit:]
 
 
 async def _run_crypto_analysis(symbol: str, tf_closed: str):
@@ -356,98 +347,126 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     logger.info(f"[Binance] {symbol} {tf_closed}: {len(all_signals)} signals")
 
 
-async def _binance_crypto_worker():
+async def _crypto_data_worker():
     """
-    Real-time crypto worker using Binance WebSocket.
-    1. Backfills candle buffers from CoinGecko
-    2. Connects to Binance WS for 1m/5m/15m klines + ticker
-    3. On candle close -> runs ICT analysis immediately
-    4. On ticker -> updates _latest_prices
+    Crypto data worker: tries Binance WebSocket first for real-time 1m/5m/15m
+    klines + ticker. Falls back to CoinGecko polling (60s cycle) if WS is
+    unavailable (e.g., geo-blocked from cloud hosting IPs).
     """
     global _latest_prices, _latest_ticks
 
     await _backfill_crypto_buffers()
+    collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
+    _last_new_timestamp: Dict[str, Optional[datetime]] = {s: None for s in BINANCE_SYMBOLS}
 
-    url = f"{BINANCE_WS_URL}?streams={_binance_streams()}"
-    retry_delay = 1.0
-    last_tf_analysis: Dict[str, float] = {}
+    # Try Binance WS first — if it connects, use it for the session
+    BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
+    streams = "/".join([f"{s.lower()}@kline_5m/{s.lower()}@kline_15m/{s.lower()}@ticker" for s in BINANCE_SYMBOLS])
+    ws_connected = False
 
+    async def _try_ws():
+        nonlocal ws_connected
+        retry = 1.0
+        while True:
+            try:
+                async with websockets.connect(f"{BINANCE_WS_URL}?streams={streams}", ping_interval=30, open_timeout=10) as ws:
+                    ws_connected = True
+                    logger.info("[Crypto] Binance WS connected.")
+                    retry = 1.0
+                    async for raw in ws:
+                        msg = json.loads(raw)
+                        data = msg.get("data", {})
+                        etype = data.get("e", "")
+                        if etype == "kline":
+                            k = data.get("k", {})
+                            sym = data.get("s", "")
+                            tf = k.get("i", "")
+                            if sym not in BINANCE_SYMBOLS or tf not in ["5m", "15m"]:
+                                continue
+                            candle = {"timestamp": datetime.fromtimestamp(k["t"]/1000),
+                                      "open": float(k["o"]), "high": float(k["h"]),
+                                      "low": float(k["l"]), "close": float(k["c"]),
+                                      "volume": float(k["v"])}
+                            _append_to_buffer(sym, tf, candle)
+                            _latest_prices[sym] = float(k["c"])
+                            if k.get("x", False):
+                                logger.info(f"[Crypto] WS {sym} {tf} closed @ {candle['close']}")
+                                await _run_crypto_analysis(sym, tf)
+                        elif etype == "24hrTicker":
+                            sym = data.get("s", "")
+                            if sym not in BINANCE_SYMBOLS:
+                                continue
+                            p = float(data.get("c", 0))
+                            if p > 0:
+                                _latest_prices[sym] = p
+                                _latest_ticks[sym] = {"symbol": sym, "price": p,
+                                    "change_24h": round(float(data.get("P", 0)), 2),
+                                    "high_24h": float(data.get("h", p)),
+                                    "low_24h": float(data.get("l", p)),
+                                    "volume": round(float(data.get("v", 0)), 2),
+                                    "timestamp": datetime.utcnow().isoformat() + "Z"}
+            except websockets.exceptions.WebSocketException as e:
+                logger.warning(f"[Crypto] WS unavailable: {e}. Retrying in {retry:.0f}s...")
+            except OSError as e:
+                logger.warning(f"[Crypto] WS connection failed: {e}. Retrying in {retry:.0f}s...")
+            ws_connected = False
+            await asyncio.sleep(retry)
+            retry = min(retry * 2, 120.0)
+
+    # Start WS attempt in background
+    ws_task = asyncio.create_task(_try_ws())
+
+    # Also run CoinGecko polling loop every 60s — acts as live data source
+    # when WS is blocked, or as a fallback to catch any missed candles
     while True:
         try:
-            logger.info("[Binance] Connecting to WebSocket...")
-            async with websockets.connect(url, ping_interval=30) as ws:
-                logger.info("[Binance] WebSocket connected.")
-                retry_delay = 1.0
+            await asyncio.sleep(60)
 
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
+            for symbol in BINANCE_SYMBOLS:
+                df_5m = await collector.fetch_historical(symbol, "5m", 288)
+                if df_5m.is_empty():
+                    continue
 
-                    stream_name = msg.get("stream", "")
-                    data = msg.get("data", {})
-                    event_type = data.get("e", "")
+                # Update price from latest close
+                last_row = df_5m.tail(1).to_dicts()[0]
+                _latest_prices[symbol] = last_row["close"]
 
-                    if event_type == "kline":
-                        k = data.get("k", {})
-                        symbol = data.get("s", "")
-                        tf = k.get("i", "")
-                        is_closed = k.get("x", False)
+                # Get the newest candle timestamp
+                newest_ts = df_5m["timestamp"].max()
+                last_seen = _last_new_timestamp.get(symbol)
 
-                        if symbol not in BINANCE_SYMBOLS or tf not in BINANCE_TIMEFRAMES:
-                            continue
+                if last_seen is None or newest_ts > last_seen:
+                    _last_new_timestamp[symbol] = newest_ts
+                    _latest_ticks[symbol] = {"symbol": symbol, "price": last_row["close"],
+                        "change_24h": 0.0, "high_24h": last_row["high"],
+                        "low_24h": last_row["low"], "volume": round(last_row["volume"], 2),
+                        "timestamp": datetime.utcnow().isoformat() + "Z"}
 
-                        candle = {
-                            "timestamp": datetime.fromtimestamp(k["t"] / 1000),
-                            "open": float(k["o"]),
-                            "high": float(k["h"]),
-                            "low": float(k["l"]),
-                            "close": float(k["c"]),
-                            "volume": float(k["v"]),
-                        }
-                        _append_to_buffer(symbol, tf, candle)
-                        _latest_prices[symbol] = float(k["c"])
+                    # Update 5m buffer and detect new close
+                    rows = df_5m.to_dicts()
+                    old_len = len(_candle_buffers.get(symbol, {}).get("5m", []))
+                    _candle_buffers.setdefault(symbol, {})["5m"] = [
+                        {"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
+                         "low": r["low"], "close": r["close"], "volume": r["volume"]}
+                        for r in rows
+                    ]
 
-                        if is_closed:
-                            now = time.time()
-                            dedup_key = f"{symbol}_{tf}_{k['t']}"
-                            if dedup_key in last_tf_analysis:
-                                continue
-                            last_tf_analysis[dedup_key] = now
-                            if len(last_tf_analysis) > 1000:
-                                cutoff = now - 120
-                                last_tf_analysis = {k: v for k, v in last_tf_analysis.items() if v > cutoff}
+                    # Resample 5m -> 15m and update buffer
+                    df_15m = _resample_5m_to_15m(df_5m)
+                    _candle_buffers[symbol]["15m"] = [
+                        {"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
+                         "low": r["low"], "close": r["close"], "volume": r["volume"]}
+                        for r in df_15m.to_dicts()
+                    ]
 
-                            logger.info(f"[Binance] {symbol} {tf} closed @ {candle['close']}")
-                            await _run_crypto_analysis(symbol, tf)
+                    if len(rows) > old_len:
+                        logger.info(f"[Crypto] CG {symbol} 5m: new candle @ {last_row['close']}")
+                        await _run_crypto_analysis(symbol, "5m")
 
-                    elif event_type == "24hrTicker":
-                        symbol = data.get("s", "")
-                        if symbol not in BINANCE_SYMBOLS:
-                            continue
-                        price = float(data.get("c", 0))
-                        if price > 0:
-                            _latest_prices[symbol] = price
-                            _latest_ticks[symbol] = {
-                                "symbol": symbol,
-                                "price": price,
-                                "change_24h": round(float(data.get("P", 0)), 2),
-                                "high_24h": float(data.get("h", price)),
-                                "low_24h": float(data.get("l", price)),
-                                "volume": round(float(data.get("v", 0)), 2),
-                                "timestamp": datetime.utcnow().isoformat() + "Z",
-                            }
-
-        except websockets.exceptions.WebSocketException as e:
-            logger.warning(f"[Binance] WS error: {e}. Reconnecting in {retry_delay:.0f}s...")
         except Exception as e:
-            logger.warning(f"[Binance] WS unexpected: {e}. Reconnecting in {retry_delay:.0f}s...")
+            logger.warning(f"[Crypto] CG polling error: {e}")
             _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
-            _health["last_error_message"] = f"Binance WS: {e}"
-
-        await asyncio.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 60.0)
+            _health["last_error_message"] = f"Crypto: {e}"
 
 
 # ── HTF Bias Worker (replaces old timer-based signal worker) ────────────
