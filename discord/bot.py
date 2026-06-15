@@ -47,7 +47,8 @@ class DiscordBot:
         symbol = signal.get("symbol", "UNKNOWN")
         stype = signal.get("signal_type", "NEUTRAL")
         score = signal.get("score", 0)
-        price = signal.get("price", 0)
+        price = signal.get("price", 0)  # current live price
+        trigger_price = signal.get("trigger_price", price)  # candle close that triggered
         timeframe = signal.get("timeframe", "?")
         bias = signal.get("bias", "neutral")
         confidence = signal.get("confidence", 0.5)
@@ -60,6 +61,15 @@ class DiscordBot:
             color = 0xf43f5e  # rose red
         else:
             color = 0x64748b  # slate gray
+
+        # Price movement indicator — auto-scale decimals based on price magnitude
+        price_diff = price - trigger_price
+        if abs(price_diff) > 0.001:
+            arrow = "🔼" if price_diff > 0 else "🔽"
+            diff_str = f"{abs(price_diff):.4f}".rstrip("0").rstrip(".")
+            movement = f"{arrow} `{diff_str}` since signal"
+        else:
+            movement = ""
 
         # Build confluence fields
         fields = [
@@ -88,8 +98,13 @@ class DiscordBot:
                 "inline": True,
             },
             {
-                "name": "Price",
-                "value": f"`{price:,.4f}`",
+                "name": "Signal Trigger",
+                "value": f"`{trigger_price:,.4f}` (candle close)",
+                "inline": True,
+            },
+            {
+                "name": "Current Price",
+                "value": f"`{price:,.4f}`\n{movement}" if movement else f"`{price:,.4f}`",
                 "inline": True,
             },
         ]

@@ -334,14 +334,20 @@ async def _signal_worker(collector: CoinGeckoCollector):
                 _recent_signals = _recent_signals[:500]
 
             # ── Demo Account: forward-test signals with 1% risk, ATR SL, 1:2 RR ──
-            # Build a map of current prices (latest close from price polling + candle data)
+            # Use live prices from CoinGecko poller (updated every 120s) — NOT candle closes
+            # which can be 5+ minutes stale by the time the signal cycle runs.
             try:
                 current_prices = dict(_latest_prices)  # gets BTC, ETH, forex from price workers
-                # Override with the most recent candle close if we have it
-                for symbol in SIGNAL_SYMBOLS:
-                    for s in all_signals:
-                        if s.get("symbol") == symbol and s.get("price", 0) > 0:
-                            current_prices[symbol] = s["price"]
+
+                # Before processing, update each signal's price to the current live price
+                # so the demo account enters at market price, not a stale candle close.
+                # Save the original trigger price for Discord display.
+                for s in all_signals:
+                    sym = s.get("symbol", "")
+                    live = _latest_prices.get(sym, 0.0)
+                    if live > 0 and s.get("price", 0) > 0:
+                        s["trigger_price"] = s["price"]  # preserve candle close for Discord
+                        s["price"] = live  # use live price for entry
 
                 # Check risk limits before processing signals
                 risk_manager.update_state(
