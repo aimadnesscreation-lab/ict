@@ -324,12 +324,18 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     except Exception as e:
         logger.warning(f"[Crypto] Demo account failed: {e}")
 
+    # Only send Discord alerts for signals that will actually open a new position
+    # Skip if we already have an open position for that symbol
     if discord_bot:
         for s in all_signals:
+            symbol = s.get("symbol", "")
             stype = s.get("signal_type", "NEUTRAL")
             score_val = s.get("score", 0)
             in_kz = s.get("in_kill_zone", False)
             if score_val >= 70 and in_kz:
+                if symbol in _demo_account.open_positions:
+                    logger.info(f"[Discord] Skipping {symbol} {stype} — position already open")
+                    continue
                 try:
                     await discord_bot.send_signal(s)
                 except Exception as e:
