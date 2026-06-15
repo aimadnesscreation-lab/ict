@@ -683,6 +683,116 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
         raise HTTPException(status_code=502, detail=f"Failed to fetch candles: {e}")
 
 
+# ─── Backtest data (paginated OKX history) ────────────────────────────
+
+OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}  # approx candles per day
+
+
+async def _okx_fetch_history(symbol: str, bar: str, limit: int = 100, after: Optional[datetime] = None) -> Optional[List[Dict]]:
+    """Fetch historical candles from OKX history-candles endpoint (up to 100 per call)."""
+    inst_id = OKX_SYMBOL_MAP.get(symbol)
+    if not inst_id:
+        return None
+    url = "https://www.okx.com/api/v5/market/history-candles"
+    params = {"instId": inst_id, "bar": bar, "limit": str(min(limit, 100))}
+    if after:
+        params["after"] = str(int(after.timestamp() * 1000))
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.warning(f"[OKX] History HTTP {resp.status_code} for {symbol} {bar}")
+                return None
+            data = resp.json()
+            if data.get("code") != "0":
+                logger.warning(f"[OKX] History API error {data.get('code')} for {symbol} {bar}")
+                return None
+            candles = data.get("data", [])
+            result = []
+            for c in reversed(candles):
+                result.append({
+                    "timestamp": datetime.fromtimestamp(int(c[0]) / 1000),
+                    "open": float(c[1]), "high": float(c[2]),
+                    "low": float(c[3]), "close": float(c[4]),
+                    "volume": float(c[5]),
+                })
+            return result
+    except Exception as e:
+        logger.warning(f"[OKX] History fetch failed: {e}")
+        return None
+
+
+@app.get("/backtest-data/{symbol}")
+async def get_backtest_data(
+    symbol: str,
+    days: int = Query(30, ge=1, le=90),
+    bar: str = Query("5m", regex="^(1m|5m|15m|1H|4H|1D)$"),
+):
+    """
+    Fetch many days of historical OHLCV data for backtesting.
+    Paginates OKX's history-candles endpoint server-side.
+    Returns candles oldest-first, no API key needed.
+    """
+    symbol = symbol.upper()
+    if symbol not in {"BTCUSDT", "ETHUSDT"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported symbol: {symbol}")
+
+    try:
+        per_day = OKX_BAR_CAPACITY.get(bar, 288)
+        total_needed = days * per_day
+        all_candles: List[Dict] = []
+        after_ts = None  # start from newest
+
+        while len(all_candles) < total_needed:
+            batch = await _okx_fetch_history(symbol, bar, 100, after=after_ts)
+            if not batch or len(batch) == 0:
+                break
+            # Add oldest-first (batch is already reversed)
+            all_candles.extend(batch)
+            # Set after_ts to oldest candle in this batch for next page
+            after_ts = batch[0]["timestamp"]
+            await asyncio.sleep(0.15)  # rate limit courtesy
+
+        if not all_candles:
+            return []
+
+        # Dedup by timestamp
+        seen = set()
+        deduped = []
+        for c in all_candles:
+            key = c["timestamp"].timestamp()
+            if key not in seen:
+                seen.add(key)
+                deduped.append(c)
+
+        # Final oldest-first sort, trim to exact requested count
+        deduped.sort(key=lambda c: c["timestamp"])
+        deduped = deduped[:total_needed]
+
+        logger.info(f"[Backtest] Fetched {len(deduped)} {bar} candles for {symbol} ({days}d)")
+
+        return [
+            {
+                "id": i + 1,
+                "symbol": symbol,
+                "timeframe": bar,
+                "timestamp": c["timestamp"].isoformat()
+                if hasattr(c["timestamp"], "isoformat")
+                else str(c["timestamp"]),
+                "open": c["open"],
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"],
+                "volume": c["volume"],
+            }
+            for i, c in enumerate(deduped)
+        ]
+
+    except Exception as e:
+        logger.error(f"[Backtest] Fetch failed: {e}")
+        raise HTTPException(status_code=502, detail=f"Failed to fetch backtest data: {e}")
+
+
 # ─── News (real via RSS) ──────────────────────────────────────────────
 
 @app.get("/news")
