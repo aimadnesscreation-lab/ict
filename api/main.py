@@ -106,7 +106,7 @@ async def lifespan(app: FastAPI):
     # Start crypto data worker (tries Binance WS, falls back to CoinGecko 60s polling)
     crypto_task = asyncio.create_task(_crypto_data_worker())
     _background_tasks.append(crypto_task)
-    logger.info("Crypto data worker scheduled (Binance WS / CoinGecko fallback).")
+    logger.info("Crypto data worker scheduled (OKX 15s poll + Binance WS attempt).")
 
     # Start HTF bias worker (CoinGecko 1h data, updates every 15 min)
     bias_task = asyncio.create_task(_htf_bias_worker())
@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
     _background_tasks.append(news_task)
 
     # Health tracking
-    _health["data_sources"] = ["CoinGecko (crypto, 60s poll)"]
+    _health["data_sources"] = ["OKX (crypto, 15s poll)"]
     if TWELVEDATA_API_KEY:
         _health["data_sources"].append("Twelve Data (forex)")
     _health["status"] = "running"
@@ -347,30 +347,70 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     logger.info(f"[Binance] {symbol} {tf_closed}: {len(all_signals)} signals")
 
 
+# ── OKX symbol map ────────────────────────────────────────────────────
+OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
+
+
+async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
+    """Fetch OHLCV candles from OKX REST API.
+
+    OKX returns candles with a 'confirm' field: "0" = still forming, "1" = closed.
+    Returns newest-first, we reverse to oldest-first. No API key needed for public data.
+    """
+    inst_id = OKX_SYMBOL_MAP.get(symbol)
+    if not inst_id:
+        return None
+    url = "https://www.okx.com/api/v5/market/candles"
+    params = {"instId": inst_id, "bar": bar, "limit": str(limit)}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.warning(f"[OKX] HTTP {resp.status_code} for {symbol} {bar}")
+                return None
+            data = resp.json()
+            if data.get("code") != "0":
+                return None
+            candles = data.get("data", [])
+            # Reverse: OKX returns newest-first, we want oldest-first
+            result = []
+            for c in reversed(candles):
+                result.append({
+                    "timestamp": datetime.fromtimestamp(int(c[0]) / 1000),
+                    "open": float(c[1]),
+                    "high": float(c[2]),
+                    "low": float(c[3]),
+                    "close": float(c[4]),
+                    "volume": float(c[5]),
+                    "confirmed": c[8] == "1",
+                })
+            return result
+    except Exception as e:
+        logger.warning(f"[OKX] Fetch failed for {symbol} {bar}: {e}")
+        return None
+
+
 async def _crypto_data_worker():
     """
-    Crypto data worker: tries Binance WebSocket first for real-time 1m/5m/15m
-    klines + ticker. Falls back to CoinGecko polling (60s cycle) if WS is
-    unavailable (e.g., geo-blocked from cloud hosting IPs).
+    Crypto data worker: tries Binance WebSocket first for real-time klines.
+    Primary data source is OKX REST API (15s polling, no API key needed).
+    Falls back to CoinGecko if OKX fails.
     """
     global _latest_prices, _latest_ticks
 
     await _backfill_crypto_buffers()
-    collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
-    _last_new_timestamp: Dict[str, Optional[datetime]] = {s: None for s in BINANCE_SYMBOLS}
+    cg_collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
+    _last_ts: Dict[str, datetime] = {}  # track last confirmed candle timestamp
 
-    # Try Binance WS first — if it connects, use it for the session
+    # Background Binance WS attempt (may or may not work from cloud IPs)
     BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
     streams = "/".join([f"{s.lower()}@kline_5m/{s.lower()}@kline_15m/{s.lower()}@ticker" for s in BINANCE_SYMBOLS])
-    ws_connected = False
 
     async def _try_ws():
-        nonlocal ws_connected
         retry = 1.0
         while True:
             try:
                 async with websockets.connect(f"{BINANCE_WS_URL}?streams={streams}", ping_interval=30, open_timeout=10) as ws:
-                    ws_connected = True
                     logger.info("[Crypto] Binance WS connected.")
                     retry = 1.0
                     async for raw in ws:
@@ -405,66 +445,67 @@ async def _crypto_data_worker():
                                     "low_24h": float(data.get("l", p)),
                                     "volume": round(float(data.get("v", 0)), 2),
                                     "timestamp": datetime.utcnow().isoformat() + "Z"}
-            except websockets.exceptions.WebSocketException as e:
-                logger.warning(f"[Crypto] WS unavailable: {e}. Retrying in {retry:.0f}s...")
-            except OSError as e:
-                logger.warning(f"[Crypto] WS connection failed: {e}. Retrying in {retry:.0f}s...")
-            ws_connected = False
+            except Exception:
+                pass  # WS unavailable (e.g. HTTP 451), keep retrying
             await asyncio.sleep(retry)
             retry = min(retry * 2, 120.0)
 
-    # Start WS attempt in background
-    ws_task = asyncio.create_task(_try_ws())
+    asyncio.create_task(_try_ws())
 
-    # Also run CoinGecko polling loop every 60s — acts as live data source
-    # when WS is blocked, or as a fallback to catch any missed candles
+    # Main data loop: poll OKX every 15s
     while True:
         try:
-            await asyncio.sleep(60)
+            await asyncio.sleep(15)
 
             for symbol in BINANCE_SYMBOLS:
-                df_5m = await collector.fetch_historical(symbol, "5m", 288)
-                if df_5m.is_empty():
+                candles = await _okx_fetch_candles(symbol, "5m", 288)
+                if not candles:
+                    # Fallback to CoinGecko if OKX fails
+                    logger.warning(f"[Crypto] OKX failed for {symbol}, trying CoinGecko...")
+                    df = await cg_collector.fetch_historical(symbol, "5m", 288)
+                    if df.is_empty():
+                        continue
+                    candles = [{"timestamp": r["timestamp"], "open": r["open"],
+                                "high": r["high"], "low": r["low"], "close": r["close"],
+                                "volume": r["volume"], "confirmed": True} for r in df.to_dicts()]
+
+                # Reverse so newest is last
+                candles_sorted = sorted(candles, key=lambda c: c["timestamp"])
+                last = candles_sorted[-1]
+                _latest_prices[symbol] = last["close"]
+
+                # Only process when a new confirmed (closed) candle appears
+                confirmed = [c for c in candles_sorted if c.get("confirmed", True)]
+                if not confirmed:
                     continue
-
-                # Update price from latest close
-                last_row = df_5m.tail(1).to_dicts()[0]
-                _latest_prices[symbol] = last_row["close"]
-
-                # Get the newest candle timestamp
-                newest_ts = df_5m["timestamp"].max()
-                last_seen = _last_new_timestamp.get(symbol)
-
-                if last_seen is None or newest_ts > last_seen:
-                    _last_new_timestamp[symbol] = newest_ts
-                    _latest_ticks[symbol] = {"symbol": symbol, "price": last_row["close"],
-                        "change_24h": 0.0, "high_24h": last_row["high"],
-                        "low_24h": last_row["low"], "volume": round(last_row["volume"], 2),
-                        "timestamp": datetime.utcnow().isoformat() + "Z"}
-
-                    # Update 5m buffer and detect new close
-                    rows = df_5m.to_dicts()
-                    old_len = len(_candle_buffers.get(symbol, {}).get("5m", []))
+                last_confirmed = confirmed[-1]["timestamp"]
+                if last_confirmed != _last_ts.get(symbol):
+                    _last_ts[symbol] = last_confirmed
+                    # Update buffers
                     _candle_buffers.setdefault(symbol, {})["5m"] = [
-                        {"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
-                         "low": r["low"], "close": r["close"], "volume": r["volume"]}
-                        for r in rows
+                        {"timestamp": c["timestamp"], "open": c["open"],
+                         "high": c["high"], "low": c["low"], "close": c["close"],
+                         "volume": c["volume"]} for c in candles_sorted
                     ]
-
-                    # Resample 5m -> 15m and update buffer
+                    # Resample to 15m
+                    df_5m = pl.DataFrame(_candle_buffers[symbol]["5m"])
                     df_15m = _resample_5m_to_15m(df_5m)
                     _candle_buffers[symbol]["15m"] = [
-                        {"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
-                         "low": r["low"], "close": r["close"], "volume": r["volume"]}
-                        for r in df_15m.to_dicts()
+                        {"timestamp": r["timestamp"], "open": r["open"],
+                         "high": r["high"], "low": r["low"], "close": r["close"],
+                         "volume": r["volume"]} for r in df_15m.to_dicts()
                     ]
-
-                    if len(rows) > old_len:
-                        logger.info(f"[Crypto] CG {symbol} 5m: new candle @ {last_row['close']}")
-                        await _run_crypto_analysis(symbol, "5m")
+                    # Update tick
+                    _latest_ticks[symbol] = {"symbol": symbol, "price": last["close"],
+                        "change_24h": 0.0, "high_24h": last["high"],
+                        "low_24h": last["low"], "volume": round(last["volume"], 2),
+                        "timestamp": datetime.utcnow().isoformat() + "Z"}
+                    # Run analysis
+                    logger.info(f"[Crypto] {symbol} 5m: new candle @ {last['close']}")
+                    await _run_crypto_analysis(symbol, "5m")
 
         except Exception as e:
-            logger.warning(f"[Crypto] CG polling error: {e}")
+            logger.warning(f"[Crypto] Polling error: {e}")
             _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
             _health["last_error_message"] = f"Crypto: {e}"
 
