@@ -80,8 +80,6 @@ BINANCE_BUFFER_LIMITS = {"1m": 360, "5m": 288, "15m": 168}  # candles per buffer
 _candle_buffers: Dict[str, Dict[str, List[Dict]]] = {}
 
 # ── API credentials ────────────────────────────────────────────────────
-# Loaded from .env at the project root
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # Create Discord bot instance if we have the webhook URL
@@ -113,20 +111,12 @@ async def lifespan(app: FastAPI):
     _background_tasks.append(bias_task)
     logger.info("HTF bias worker scheduled (OKX 1h, 15min cycle).")
 
-    # Start Twelve Data WS price worker (forex) — only if we have the API key
-    if TWELVEDATA_API_KEY:
-        td_task = asyncio.create_task(_twelve_data_worker())
-        _background_tasks.append(td_task)
-        logger.info("Twelve Data forex worker scheduled.")
-
     # Start news refresh worker
     news_task = asyncio.create_task(_news_worker())
     _background_tasks.append(news_task)
 
     # Health tracking
     _health["data_sources"] = ["OKX (crypto, 15s poll)"]
-    if TWELVEDATA_API_KEY:
-        _health["data_sources"].append("Twelve Data (forex)")
     _health["status"] = "running"
 
     logger.info(f"Started {len(_background_tasks)} background workers.")
@@ -213,7 +203,7 @@ def _append_to_buffer(symbol: str, tf: str, candle: Dict):
 
 async def _run_crypto_analysis(symbol: str, tf_closed: str):
     """
-    Called when a candle closes on Binance.
+    Called when a new 5m candle closes (from OKX 15s polling or Binance WS).
     Runs the ICT pipeline, generates signals, processes demo account, sends Discord.
     """
     global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache
@@ -332,7 +322,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
         perf["open_positions"] = open_positions
         _performance_cache = perf
     except Exception as e:
-        logger.warning(f"[Binance] Demo account failed: {e}")
+        logger.warning(f"[Crypto] Demo account failed: {e}")
 
     if discord_bot:
         for s in all_signals:
@@ -343,10 +333,10 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
                 try:
                     await discord_bot.send_signal(s)
                 except Exception as e:
-                    logger.warning(f"[Binance] Discord send failed: {e}")
+                    logger.warning(f"[Crypto] Discord send failed: {e}")
 
     _health["last_cycle_time"] = datetime.utcnow().isoformat() + "Z"
-    logger.info(f"[Binance] {symbol} {tf_closed}: {len(all_signals)} signals")
+    logger.info(f"[Crypto] {symbol} {tf_closed}: {len(all_signals)} signals")
 
 
 # ── OKX symbol map ────────────────────────────────────────────────────
@@ -572,15 +562,10 @@ async def _news_worker():
 
 @app.get("/")
 async def root():
-    data_sources = ["OKX (crypto, 15s poll)"]
-    if TWELVEDATA_API_KEY:
-        data_sources.append("Twelve Data (forex)")
-    else:
-        data_sources.append("Forex (mock — set TWELVEDATA_API_KEY for live)")
     return {
         "status": "online",
         "version": "0.1.0",
-        "data_source": " + ".join(data_sources),
+        "data_source": "OKX (crypto, 15s poll)",
     }
 
 
@@ -654,20 +639,21 @@ def format_signal(s: Dict) -> Dict:
 
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
-    """    Fetch historical candles from OKX REST API.
-    Supports crypto pairs (BTCUSDT, ETHUSDT). Forex pairs return empty with a note."""
+    """
+    Fetch historical candles from OKX REST API.
+    Supports crypto pairs (BTCUSDT, ETHUSDT).
+    """
     symbol = symbol.upper()
 
     CRYPTO_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
 
     if symbol not in CRYPTO_SYMBOLS:
         return {
-            "error": f"Real data for {symbol} requires a forex API provider",
+            "error": f"Unsupported symbol: {symbol}. Only BTCUSDT and ETHUSDT are available.",
             "data": [],
         }
 
     try:
-        # Map our timeframe to OKX bar format
         tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
         bar = tf_map.get(timeframe, "1H")
         candles = await _okx_fetch_candles(symbol, bar, limit)
@@ -858,8 +844,6 @@ async def get_health():
         "data_sources": _health.get("data_sources", []),
         "btc_price": _latest_prices.get("BTCUSDT", 0),
         "eth_price": _latest_prices.get("ETHUSDT", 0),
-        "forex_prices_available": {s: _latest_prices.get(s, 0) for s in FOREX_SYMBOLS},
-        "twelve_data_connected": TWELVEDATA_API_KEY and any(s in _latest_ticks for s in FOREX_SYMBOLS),
     }
 
 
@@ -889,182 +873,21 @@ async def get_risk_status():
 
 import websockets
 
-# Symbols tracked in the header ticker
-TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
+# Symbols tracked in the price stream
+TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-# ── Forex (via Twelve Data) ─────────────────────────────────────────────
-FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
-
-# Twelve Data uses forward-slash format (EUR/USD)
-TWELVEDATA_SYMBOL_MAP = {"EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "XAUUSD": "XAU/USD", "USDJPY": "USD/JPY"}
-TWELVEDATA_SYMBOLS = list(TWELVEDATA_SYMBOL_MAP.values())  # ["EUR/USD", "GBP/USD", "XAU/USD", "USD/JPY"]
-TWELVEDATA_WS_URL = f"wss://ws.twelvedata.com/v1/quotes/price?apikey={TWELVEDATA_API_KEY}"
-TWELVEDATA_REST_URL = "https://api.twelvedata.com/quote"
-
-FOREX_BASE_PRICES = {"EURUSD": 1.1042, "GBPUSD": 1.2654, "XAUUSD": 2342.10, "USDJPY": 151.24}  # fallback seed prices (overwritten by Twelve Data)
-FOREX_PRECISION = {"EURUSD": 4, "GBPUSD": 4, "XAUUSD": 2, "USDJPY": 3}  # decimal places per symbol
-
-# Default precision for symbols not in FOREX_PRECISION (crypto)
 DEFAULT_PRECISION = 2
 
 
 def _price_precision(symbol: str) -> int:
     """Return appropriate decimal places for a given symbol's price display."""
-    return FOREX_PRECISION.get(symbol, DEFAULT_PRECISION)
+    return DEFAULT_PRECISION
 
 # Shared in-memory state: latest price for each symbol
 _latest_prices: Dict[str, float] = {
     "BTCUSDT": 68420.0, "ETHUSDT": 3520.0,
-    **FOREX_BASE_PRICES,
 }
 _latest_ticks: Dict[str, Dict] = {}
-
-# Cache for forex 24h stats (refreshed via REST API every 5 min)
-_forex_24h_stats: Dict[str, Dict] = {
-    sym: {"change_24h": 0.0, "high_24h": base, "low_24h": base}
-    for sym, base in FOREX_BASE_PRICES.items()
-}
-
-
-# ── Twelve Data WebSocket background worker (forex) ────────────────────
-
-async def _twelve_data_worker():
-    """
-    Background task: connect to Twelve Data's WebSocket for real-time forex
-    prices and update _latest_ticks / _latest_prices. Falls back to REST API
-    for 24h stats (high, low, change).
-    """
-    if not TWELVEDATA_API_KEY:
-        logger.warning("Twelve Data API key missing — forex will use mock data.")
-        return
-
-    retry_delay = 1.0
-
-    # Map Twelve Data symbol format -> our format ("EUR/USD" -> "EURUSD")
-    def to_internal(td_symbol: str) -> str:
-        return td_symbol.replace("/", "")
-
-    async def _fetch_all_forex_quotes() -> None:
-        """Fetch full quotes for all forex symbols in a single REST call."""
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                symbols_str = ",".join(TWELVEDATA_SYMBOLS)
-                resp = await client.get(
-                    TWELVEDATA_REST_URL,
-                    params={"symbol": symbols_str, "apikey": TWELVEDATA_API_KEY},
-                )
-                if resp.status_code != 200:
-                    logger.warning(f"Twelve Data REST: HTTP {resp.status_code}")
-                    return
-                data = resp.json()
-                if isinstance(data, dict) and "code" in data:
-                    return  # API error
-                # Response is a dict keyed by symbol: {"EUR/USD": {...}, "GBP/USD": {...}}
-                for td_symbol, quote in data.items():
-                    if not isinstance(quote, dict) or "code" in quote:
-                        continue
-                    internal = td_symbol.replace("/", "")
-                    if internal not in FOREX_SYMBOLS:
-                        continue
-                    _forex_24h_stats[internal] = {
-                        "change_24h": round(float(quote.get("percent_change", 0)), 2),
-                        "high_24h": round(float(quote.get("high", FOREX_BASE_PRICES[internal])), FOREX_PRECISION[internal]),
-                        "low_24h": round(float(quote.get("low", FOREX_BASE_PRICES[internal])), FOREX_PRECISION[internal]),
-                    }
-                logger.info(f"Twelve Data REST refresh complete ({len(data)} symbols).")
-        except Exception as e:
-            logger.warning(f"Twelve Data REST fetch failed: {e}")
-
-    while True:
-        try:
-            logger.info(f"Connecting to Twelve Data WS...")
-            async with websockets.connect(TWELVEDATA_WS_URL, ping_interval=30) as ws:
-                logger.info("Twelve Data WS connected.")
-                retry_delay = 1.0
-
-                # Subscribe to forex pairs
-                subscribe_msg = json.dumps({
-                    "action": "subscribe",
-                    "params": {"symbols": ",".join(TWELVEDATA_SYMBOLS)},
-                })
-                await ws.send(subscribe_msg)
-                logger.info(f"Subscribed to Twelve Data: {', '.join(TWELVEDATA_SYMBOLS)}")
-
-                # Start a heartbeat task (Twelve Data expects JSON heartbeats every ~20s)
-                async def _heartbeat_loop():
-                    while True:
-                        await asyncio.sleep(20)
-                        try:
-                            await ws.send(json.dumps({"action": "heartbeat"}))
-                        except Exception:
-                            break
-
-                heartbeat_task = asyncio.create_task(_heartbeat_loop())
-
-                # Start periodic REST quote fetcher (every 5 min) for 24h stats
-                last_rest_fetch = datetime.utcnow()
-
-                # Start with an initial REST fetch
-                await _fetch_all_forex_quotes()
-
-                async for raw in ws:
-                    try:
-                        data = json.loads(raw)
-                        event = data.get("event", "")
-
-                        if event == "price":
-                            td_symbol = data.get("symbol", "")
-                            internal_symbol = to_internal(td_symbol)
-                            if internal_symbol not in FOREX_SYMBOLS:
-                                continue
-
-                            price = float(data.get("price", 0))
-                            if price == 0:
-                                continue
-
-                            prec = FOREX_PRECISION.get(internal_symbol, 4)
-                            stats = _forex_24h_stats.get(
-                                internal_symbol,
-                                {"change_24h": 0.0, "high_24h": price, "low_24h": price},
-                            )
-
-                            tick = {
-                                "symbol": internal_symbol,
-                                "price": round(price, prec),
-                                "change_24h": stats["change_24h"],
-                                "high_24h": stats["high_24h"],
-                                "low_24h": stats["low_24h"],
-                                "volume": round(float(data.get("day_volume", 0)), 2),
-                                "timestamp": datetime.utcnow().isoformat() + "Z",
-                            }
-                            _latest_ticks[internal_symbol] = tick
-                            _latest_prices[internal_symbol] = tick["price"]
-
-                        elif event == "heartbeat":
-                            pass  # Server heartbeat, nothing needed
-
-                        # Refresh 24h stats from REST every 15 minutes (free tier rate limits)
-                        now = datetime.utcnow()
-                        if (now - last_rest_fetch).total_seconds() >= 900:
-                            await _fetch_all_forex_quotes()
-                            last_rest_fetch = now
-
-                    except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-                        continue
-
-        except websockets.exceptions.WebSocketException as e:
-            logger.warning(f"Twelve Data WS error: {e}. Reconnecting in {retry_delay:.0f}s...")
-        except Exception as e:
-            logger.warning(f"Twelve Data WS unexpected error: {e}. Reconnecting in {retry_delay:.0f}s...")
-
-        # Cancel heartbeat task if it was started
-        try:
-            heartbeat_task.cancel()
-        except (NameError, Exception):
-            pass
-
-        await asyncio.sleep(retry_delay)
-        retry_delay = min(retry_delay * 2, 60.0)
 
 
 # ── Dashboard static files ────────────────────────────────────────────
@@ -1085,9 +908,7 @@ else:
 async def _stream_prices(websocket: WebSocket):
     """Stream prices to the connected dashboard client.
 
-    Crypto symbols come from OKX polling.
-    Forex symbols come from Twelve Data WS (_twelve_data_worker)
-    when the API key is configured; otherwise they fall back to mock.
+    Crypto prices come from OKX polling.
     """
     await websocket.accept()
 
@@ -1095,38 +916,12 @@ async def _stream_prices(websocket: WebSocket):
     for symbol in TRACKED_SYMBOLS:
         if symbol in _latest_ticks and _latest_ticks[symbol]:
             await websocket.send_json(_latest_ticks[symbol])
-        elif symbol in FOREX_SYMBOLS and symbol in _latest_prices:
-            # If Twelve Data is active, _latest_ticks will have forex data already.
-            # If not, generate a one-off mock tick so the dashboard isn't empty.
-            if not TWELVEDATA_API_KEY:
-                await websocket.send_json({
-                    "symbol": symbol,
-                    "price": _latest_prices[symbol],
-                    "change_24h": 0.0,
-                    "high_24h": FOREX_BASE_PRICES.get(symbol, _latest_prices[symbol]),
-                    "low_24h": FOREX_BASE_PRICES.get(symbol, _latest_prices[symbol]),
-                    "volume": 0,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                })
 
     try:
         while True:
             for symbol in TRACKED_SYMBOLS:
                 if symbol in _latest_ticks:
-                    tick = _latest_ticks[symbol]
-                    await websocket.send_json(tick)
-                elif symbol in FOREX_SYMBOLS:
-                    # Only generate mock ticks if Twelve Data is NOT configured
-                    if not TWELVEDATA_API_KEY and symbol in _latest_prices:
-                        await websocket.send_json({
-                            "symbol": symbol,
-                            "price": _latest_prices[symbol],
-                            "change_24h": 0.0,
-                            "high_24h": FOREX_BASE_PRICES.get(symbol, _latest_prices[symbol]),
-                            "low_24h": FOREX_BASE_PRICES.get(symbol, _latest_prices[symbol]),
-                            "volume": 0,
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
-                        })
+                    await websocket.send_json(_latest_ticks[symbol])
                 await asyncio.sleep(0.25)
             await asyncio.sleep(0.25)
     except WebSocketDisconnect:
