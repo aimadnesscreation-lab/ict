@@ -13,7 +13,7 @@ from loguru import logger
 from contextlib import asynccontextmanager
 
 # ── Real data imports ─────────────────────────────────────────────────
-from market_data.coingecko import CoinGeckoCollector
+# CoinGecko removed — using OKX for all crypto data
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.order_blocks import OrderBlockDetector
@@ -103,15 +103,15 @@ _background_tasks: List[asyncio.Task] = []
 async def lifespan(app: FastAPI):
     """Start all background workers on startup, cancel on shutdown."""
 
-    # Start crypto data worker (tries Binance WS, falls back to CoinGecko 60s polling)
+    # Start crypto data worker (OKX 15s poll + Binance WS attempt)
     crypto_task = asyncio.create_task(_crypto_data_worker())
     _background_tasks.append(crypto_task)
     logger.info("Crypto data worker scheduled (OKX 15s poll + Binance WS attempt).")
 
-    # Start HTF bias worker (CoinGecko 1h data, updates every 15 min)
+    # Start HTF bias worker (OKX 1h data, updates every 15 min)
     bias_task = asyncio.create_task(_htf_bias_worker())
     _background_tasks.append(bias_task)
-    logger.info("HTF bias worker scheduled (CoinGecko 1h, 15min cycle).")
+    logger.info("HTF bias worker scheduled (OKX 1h, 15min cycle).")
 
     # Start Twelve Data WS price worker (forex) — only if we have the API key
     if TWELVEDATA_API_KEY:
@@ -158,7 +158,7 @@ app.add_middleware(
 
 # ── Background workers ────────────────────────────────────────────────
 
-# ── Crypto Data Worker (Binance WS with CoinGecko fallback) ────────────
+# ── Crypto Data Worker (OKX REST 15s poll + Binance WS attempt) ─────────
 
 def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
     idx = df.with_row_index().with_columns((pl.col("index") // 3).alias("_g"))
@@ -170,25 +170,27 @@ def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
 
 
 async def _backfill_crypto_buffers():
-    """Backfill 5m buffers from CoinGecko on startup, resample 15m."""
+    """Backfill 5m buffers from OKX on startup, resample 15m."""
     global _candle_buffers
-    cg = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
     for symbol in BINANCE_SYMBOLS:
-        df_5m = await cg.fetch_historical(symbol, "5m", 288)
-        if not df_5m.is_empty():
-            buf = [{"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
-                    "low": r["low"], "close": r["close"], "volume": r["volume"]}
-                   for r in df_5m.to_dicts()]
+        candles = await _okx_fetch_candles(symbol, "5m", 288)
+        if candles:
+            buf = [{"timestamp": c["timestamp"], "open": c["open"], "high": c["high"],
+                    "low": c["low"], "close": c["close"], "volume": c["volume"]}
+                   for c in candles]
             _candle_buffers.setdefault(symbol, {})["5m"] = buf
-            # Also build 15m from the same 5m data
+            # Resample to 15m
+            df_5m = pl.DataFrame(buf)
             df_15m = _resample_5m_to_15m(df_5m)
             buf15 = [{"timestamp": r["timestamp"], "open": r["open"], "high": r["high"],
                       "low": r["low"], "close": r["close"], "volume": r["volume"]}
                      for r in df_15m.to_dicts()]
             _candle_buffers[symbol]["15m"] = buf15
             logger.info(f"[Crypto] Backfilled {len(buf)} 5m + {len(buf15)} 15m for {symbol}")
-        _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
-        _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
+        else:
+            logger.warning(f"[Crypto] OKX backfill failed for {symbol}, starting empty")
+            _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
+            _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
 
 
 def _buffer_to_df(symbol: str, tf: str) -> pl.DataFrame:
@@ -392,14 +394,12 @@ async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optiona
 
 async def _crypto_data_worker():
     """
-    Crypto data worker: tries Binance WebSocket first for real-time klines.
-    Primary data source is OKX REST API (15s polling, no API key needed).
-    Falls back to CoinGecko if OKX fails.
+    Crypto data worker: primary source is OKX REST API (15s polling, no API key needed).
+    Also attempts Binance WebSocket as a bonus (may not work from cloud IPs).
     """
     global _latest_prices, _latest_ticks
 
     await _backfill_crypto_buffers()
-    cg_collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
     _last_ts: Dict[str, datetime] = {}  # track last confirmed candle timestamp
 
     # Background Binance WS attempt (may or may not work from cloud IPs)
@@ -460,14 +460,8 @@ async def _crypto_data_worker():
             for symbol in BINANCE_SYMBOLS:
                 candles = await _okx_fetch_candles(symbol, "5m", 288)
                 if not candles:
-                    # Fallback to CoinGecko if OKX fails
-                    logger.warning(f"[Crypto] OKX failed for {symbol}, trying CoinGecko...")
-                    df = await cg_collector.fetch_historical(symbol, "5m", 288)
-                    if df.is_empty():
-                        continue
-                    candles = [{"timestamp": r["timestamp"], "open": r["open"],
-                                "high": r["high"], "low": r["low"], "close": r["close"],
-                                "volume": r["volume"], "confirmed": True} for r in df.to_dicts()]
+                    logger.warning(f"[Crypto] OKX fetch failed for {symbol}, skipping...")
+                    continue
 
                 # Reverse so newest is last
                 candles_sorted = sorted(candles, key=lambda c: c["timestamp"])
@@ -514,29 +508,30 @@ async def _crypto_data_worker():
 
 async def _htf_bias_worker():
     """
-    Periodically fetches 1h data from CoinGecko and updates HTF bias.
-    Runs every 15 minutes. The Binance crypto worker reads _health["htf_bias"].
+    Periodically fetches 1h data from OKX and updates HTF bias via EMA.
+    Runs every 15 minutes. The crypto data worker reads _health["htf_bias"].
     """
     global _health
-    collector = CoinGeckoCollector(symbols=["BTCUSDT"], timeframes=["1h"])
 
     while True:
         try:
-            df_htf = await collector.fetch_historical("BTCUSDT", "1h", 168)
-            if not df_htf.is_empty() and len(df_htf) >= 26:
+            candles = await _okx_fetch_candles("BTCUSDT", "1H", 168)
+            if candles and len(candles) >= 26:
+                df_htf = pl.DataFrame(candles)
                 htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
                 df_swings = _ict_ms.detect_swings(df_htf)
                 swing_bias = determine_bias_from_swings(df_swings)
-                logger.info(f"[Bias] HTF: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}, {len(df_htf)} candles")
+                logger.info(f"[Bias] HTF: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}, {len(candles)} candles")
                 _health["htf_bias"] = htf_bias
                 _health["cycle_count"] = _health.get("cycle_count", 0) + 1
-            elif not df_htf.is_empty() and len(df_htf) >= 8:
+            elif candles and len(candles) >= 8:
+                df_htf = pl.DataFrame(candles)
                 df_swings = _ict_ms.detect_swings(df_htf)
                 htf_bias = determine_bias_from_swings(df_swings)
                 _health["htf_bias"] = htf_bias
-                logger.info(f"[Bias] HTF: {htf_bias.upper()} (swing fallback, {len(df_htf)} candles)")
+                logger.info(f"[Bias] HTF: {htf_bias.upper()} (swing fallback, {len(candles)} candles)")
             else:
-                logger.warning(f"[Bias] Not enough data ({len(df_htf)} candles), keeping current")
+                logger.warning(f"[Bias] Not enough data ({len(candles) if candles else 0} candles), keeping current")
         except Exception as e:
             logger.warning(f"[Bias] Update failed: {e}")
             _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
@@ -577,7 +572,7 @@ async def _news_worker():
 
 @app.get("/")
 async def root():
-    data_sources = ["CoinGecko (crypto)"]
+    data_sources = ["OKX (crypto, 15s poll)"]
     if TWELVEDATA_API_KEY:
         data_sources.append("Twelve Data (forex)")
     else:
@@ -659,13 +654,10 @@ def format_signal(s: Dict) -> Dict:
 
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
-    """
-    Fetch historical candles from CoinGecko.
-    Supports crypto pairs (BTCUSDT, ETHUSDT). Forex pairs return empty with a note.
-    """
+    """    Fetch historical candles from OKX REST API.
+    Supports crypto pairs (BTCUSDT, ETHUSDT). Forex pairs return empty with a note."""
     symbol = symbol.upper()
 
-    # Only crypto pairs are available via CoinGecko
     CRYPTO_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
 
     if symbol not in CRYPTO_SYMBOLS:
@@ -675,10 +667,12 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
         }
 
     try:
-        collector = CoinGeckoCollector(symbols=[symbol], timeframes=[timeframe])
-        df = await collector.fetch_historical(symbol, timeframe, limit)
+        # Map our timeframe to OKX bar format
+        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
+        bar = tf_map.get(timeframe, "1H")
+        candles = await _okx_fetch_candles(symbol, bar, limit)
 
-        if df.is_empty():
+        if not candles:
             return []
 
         return [
@@ -686,16 +680,16 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
                 "id": i + 1,
                 "symbol": symbol,
                 "timeframe": timeframe,
-                "timestamp": row["timestamp"].isoformat()
-                if hasattr(row["timestamp"], "isoformat")
-                else str(row["timestamp"]),
-                "open": row["open"],
-                "high": row["high"],
-                "low": row["low"],
-                "close": row["close"],
-                "volume": row["volume"],
+                "timestamp": c["timestamp"].isoformat()
+                if hasattr(c["timestamp"], "isoformat")
+                else str(c["timestamp"]),
+                "open": c["open"],
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"],
+                "volume": c["volume"],
             }
-            for i, row in enumerate(df.to_dicts())
+            for i, c in enumerate(candles)
         ]
 
     except Exception as e:
@@ -898,9 +892,6 @@ import websockets
 # Symbols tracked in the header ticker
 TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT", "EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
 
-# ── Crypto (via CoinGecko) ──────────────────────────────────────────────
-COINGECKO_IDS = "bitcoin,ethereum"
-
 # ── Forex (via Twelve Data) ─────────────────────────────────────────────
 FOREX_SYMBOLS = ["EURUSD", "GBPUSD", "XAUUSD", "USDJPY"]
 
@@ -1094,7 +1085,7 @@ else:
 async def _stream_prices(websocket: WebSocket):
     """Stream prices to the connected dashboard client.
 
-    Crypto symbols come from Binance WS ticker (_binance_crypto_worker).
+    Crypto symbols come from OKX polling.
     Forex symbols come from Twelve Data WS (_twelve_data_worker)
     when the API key is configured; otherwise they fall back to mock.
     """
