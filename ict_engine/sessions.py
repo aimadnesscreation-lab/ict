@@ -9,8 +9,8 @@ Sessions:
   - New York: 13:00 – 22:00 UTC
 
 Kill Zones:
-  - London Kill Zone (LKZ): 03:00 – 05:00 UTC (winter) / 02:00 – 04:00 UTC (summer)
-  - New York Kill Zone (NYKZ): 13:00 – 15:00 UTC (winter) / 12:00 – 14:00 UTC (summer)
+  - London Kill Zone (LKZ): 07:00 – 09:00 UTC (covers London open year-round)
+  - New York Kill Zone (NYKZ): 13:00 – 15:00 UTC (covers NY open year-round)
   - London Close: 17:00 – 18:00 UTC
 """
 
@@ -29,7 +29,7 @@ SESSION_WINDOWS = {
 
 # Kill Zones (UTC, standard/winter time)
 KILL_ZONE_WINDOWS = {
-    "london_kill_zone":   (time(3, 0),  time(5, 0)),    # 03:00–05:00 UTC
+    "london_kill_zone":   (time(7, 0),  time(9, 0)),    # 07:00–09:00 UTC (London open)
     "new_york_kill_zone": (time(13, 0), time(15, 0)),   # 13:00–15:00 UTC
     "london_close":       (time(17, 0), time(18, 0)),   # 17:00–18:00 UTC
 }
@@ -120,7 +120,7 @@ class SessionDetector:
         session_asian   = (hour >= 0) & (hour < 9)
         session_london  = (hour >= 8) & (hour < 17)
         session_ny      = (hour >= 13) & (hour < 22)
-        kz_london       = (hour >= 3) & (hour < 5)
+        kz_london       = (hour >= 7) & (hour < 9)
         kz_ny           = (hour >= 13) & (hour < 15)
         london_close    = (hour >= 17) & (hour < 18)
 
