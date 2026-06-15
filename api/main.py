@@ -21,7 +21,6 @@ from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.breaker_block import BreakerBlockDetector
-from backtesting.engine import BacktestEngine
 from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
 from discord.bot import DiscordBot
@@ -57,6 +56,29 @@ risk_manager = RiskManager(
     max_open_positions=3,
 )
 
+# ── ICT detectors (shared across all workers, created once) ─────────
+_ict_ms = MarketStructure(n=3)
+_ict_fvg = FVGDetector()
+_ict_ob = OrderBlockDetector()
+_ict_liquidity = LiquidityDetector(atr_threshold=0.10)
+_ict_sessions = SessionDetector()
+_ict_pd = PremiumDiscountDetector()
+_ict_breaker = BreakerBlockDetector()
+_signal_engine = SignalEngine()
+_demo_account = DemoAccount(
+    initial_balance=10_000.0, risk_per_trade_pct=1.0,
+    max_daily_loss_pct=risk_manager.max_daily_loss_pct,
+    max_open_positions=risk_manager.max_open_positions,
+)
+
+# ── Binance crypto data ──────────────────────────────────────────────
+BINANCE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+BINANCE_TIMEFRAMES = ["1m", "5m", "15m"]
+BINANCE_BUFFER_LIMITS = {"1m": 360, "5m": 288, "15m": 168}  # candles per buffer
+
+# Candle buffers: _candle_buffers[symbol][timeframe] = List[Dict]
+_candle_buffers: Dict[str, Dict[str, List[Dict]]] = {}
+
 # ── API credentials ────────────────────────────────────────────────────
 # Loaded from .env at the project root
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
@@ -80,13 +102,17 @@ _background_tasks: List[asyncio.Task] = []
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start all background workers on startup, cancel on shutdown."""
-    # Multi-timeframe collector — supports 5m, 15m
-    TIMEFRAMES = ["5m", "15m"]
-    collector = CoinGeckoCollector(symbols=["BTCUSDT", "ETHUSDT"], timeframes=TIMEFRAMES)
 
-    # Start crypto price polling worker (CoinGecko, no WebSocket needed)
-    price_task = asyncio.create_task(_crypto_price_worker())
-    _background_tasks.append(price_task)
+    # Start Binance WS crypto worker (real-time 1m/5m/15m candles + ticker)
+    # No API key needed — replaces old CoinGecko polling
+    binance_task = asyncio.create_task(_binance_crypto_worker())
+    _background_tasks.append(binance_task)
+    logger.info("Binance crypto WS worker scheduled (real-time 1m/5m/15m).")
+
+    # Start HTF bias worker (CoinGecko 1h data, updates every 15 min)
+    bias_task = asyncio.create_task(_htf_bias_worker())
+    _background_tasks.append(bias_task)
+    logger.info("HTF bias worker scheduled (CoinGecko 1h, 15min cycle).")
 
     # Start Twelve Data WS price worker (forex) — only if we have the API key
     if TWELVEDATA_API_KEY:
@@ -94,16 +120,12 @@ async def lifespan(app: FastAPI):
         _background_tasks.append(td_task)
         logger.info("Twelve Data forex worker scheduled.")
 
-    # Start signal generation worker (ICT engine on real candles, multi-timeframe)
-    signal_task = asyncio.create_task(_signal_worker(collector))
-    _background_tasks.append(signal_task)
-
     # Start news refresh worker
     news_task = asyncio.create_task(_news_worker())
     _background_tasks.append(news_task)
 
-    # Signal health tracking
-    _health["data_sources"] = ["CoinGecko (crypto)"]
+    # Health tracking
+    _health["data_sources"] = ["Binance WS (crypto)"]
     if TWELVEDATA_API_KEY:
         _health["data_sources"].append("Twelve Data (forex)")
     _health["status"] = "running"
@@ -137,294 +159,331 @@ app.add_middleware(
 
 # ── Background workers ────────────────────────────────────────────────
 
-async def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
-    """Resample 5m candles to 15m locally (no API call needed)."""
-    df = df.sort("timestamp")
-    df = df.with_row_index()
-    df = df.with_columns((pl.col("index") // 3).alias("_group"))
-    resampled = df.group_by("_group", maintain_order=True).agg([
-        pl.col("timestamp").first().alias("timestamp"),
-        pl.col("open").first().alias("open"),
-        pl.col("high").max().alias("high"),
-        pl.col("low").min().alias("low"),
-        pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume"),
-    ]).drop("_group").sort("timestamp")
-    return resampled
+# ── Binance WebSocket Worker (real-time crypto data + signals) ─────────
+
+# Binance combined streams URL — no API key needed
+BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
 
 
-async def _signal_worker(collector: CoinGeckoCollector):
+def _binance_streams() -> str:
+    """Build the combined streams path for all symbols + timeframes + ticker."""
+    pairs = []
+    for sym in BINANCE_SYMBOLS:
+        s = sym.lower()
+        for tf in ["1m", "5m", "15m"]:
+            pairs.append(f"{s}@kline_{tf}")
+        pairs.append(f"{s}@ticker")
+    return "/".join(pairs)
+
+
+async def _backfill_crypto_buffers():
+    """Backfill 5m and 15m buffers from CoinGecko on startup."""
+    global _candle_buffers
+    collector = CoinGeckoCollector(symbols=BINANCE_SYMBOLS, timeframes=["5m"])
+    for symbol in BINANCE_SYMBOLS:
+        df_5m = await collector.fetch_historical(symbol, "5m", 288)
+        if not df_5m.is_empty():
+            buf = []
+            for row in df_5m.to_dicts():
+                buf.append({
+                    "timestamp": row["timestamp"],
+                    "open": row["open"],
+                    "high": row["high"],
+                    "low": row["low"],
+                    "close": row["close"],
+                    "volume": row["volume"],
+                })
+            _candle_buffers.setdefault(symbol, {})["5m"] = buf
+            logger.info(f"[Binance] Backfilled {len(buf)} 5m candles for {symbol}")
+        _candle_buffers.setdefault(symbol, {}).setdefault("1m", [])
+        _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
+
+
+def _append_to_buffer(symbol: str, tf: str, candle: Dict):
+    buf = _candle_buffers.setdefault(symbol, {}).setdefault(tf, [])
+    # Replace if last candle has same timestamp (avoid duplicates from backfill/WS overlap)
+    if buf and buf[-1]["timestamp"] == candle["timestamp"]:
+        buf[-1] = candle
+    else:
+        buf.append(candle)
+    limit = BINANCE_BUFFER_LIMITS.get(tf, 288)
+    if len(buf) > limit:
+        buf[:] = buf[-limit:]
+
+
+def _buffer_to_df(symbol: str, tf: str) -> pl.DataFrame:
+    buf = _candle_buffers.get(symbol, {}).get(tf, [])
+    if len(buf) < 10:
+        return pl.DataFrame()
+    return pl.DataFrame(buf)
+
+
+async def _run_crypto_analysis(symbol: str, tf_closed: str):
     """
-    Periodically fetch candles across multiple timeframes (5m, 15m, 1h),
-    run full ICT detection pipeline, generate signals with confluence scoring.
+    Called when a candle closes on Binance.
+    Runs the ICT pipeline, generates signals, processes demo account, sends Discord.
     """
-    global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache, _health
+    global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache
 
-    ict_ms = MarketStructure(n=3)       # Swing N=3 per ict.md
-    ict_fvg = FVGDetector()
-    ict_ob = OrderBlockDetector()
-    ict_liquidity = LiquidityDetector(atr_threshold=0.10)
-    ict_sessions = SessionDetector()
-    ict_pd = PremiumDiscountDetector()
-    ict_breaker = BreakerBlockDetector()
-    signal_engine = SignalEngine()
-    backtester = BacktestEngine(initial_capital=10000.0, rr_target=2.0, rr_stop=1.0)
-    demo_account = DemoAccount(initial_balance=10_000.0, risk_per_trade_pct=1.0,
-                                max_daily_loss_pct=risk_manager.max_daily_loss_pct,
-                                max_open_positions=risk_manager.max_open_positions)
-    # Timeframes and symbols
-    TIMEFRAMES = ["5m", "15m"]
-    SIGNAL_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+    htf_bias = _health.get("htf_bias", "neutral")
+    all_signals: List[Dict] = []
 
-    # How long to sleep between cycles (fastest timeframe = 5m)
-    CYCLE_INTERVAL = 300  # 5 minutes
+    tfs_to_analyze = ["5m", "15m"]
+    if tf_closed == "1m":
+        tfs_to_analyze = ["1m", "5m", "15m"]
+
+    for tf in tfs_to_analyze:
+        df = _buffer_to_df(symbol, tf)
+        if df.is_empty() or len(df) < 20:
+            continue
+
+        df = _ict_ms.detect_swings(df)
+        df = _ict_ms.detect_bos_mss(df)
+        df = _ict_fvg.detect_fvgs(df)
+        df = _ict_ob.detect_order_blocks(df)
+        df = _ict_liquidity.detect_all(df)
+        df = _ict_sessions.detect_sessions(df)
+        df = _ict_pd.compute_zones(df)
+        df = _ict_breaker.detect_breaker_blocks(df)
+
+        mss_type = None
+        if "mss" in df.columns:
+            latest_mss = df["mss"].drop_nulls().tail(1)
+            if len(latest_mss) > 0:
+                mss_type = latest_mss[0]
+        sweep_type = None
+        if "liquidity_sweep_type" in df.columns:
+            latest_sweep = df["liquidity_sweep_type"].drop_nulls().tail(1)
+            if len(latest_sweep) > 0:
+                sweep_type = latest_sweep[0]
+
+        signal = _signal_engine.generate_signal(
+            df, mss_type=mss_type, sweep_type=sweep_type,
+            news_sentiment=0.0, timeframe=tf,
+            htf_bias=htf_bias,
+        )
+        signal["symbol"] = symbol
+        signal["id"] = None
+
+        if "atr" in df.columns:
+            latest_atr = df["atr"].tail(1).to_list()
+            signal["atr"] = latest_atr[0] if latest_atr and latest_atr[0] is not None else 0.0
+        else:
+            signal["atr"] = 0.0
+
+        score = signal["score"]
+        if score >= 80:
+            signal["confidence"] = round(random.uniform(0.85, 0.98), 2)
+        elif score >= 60:
+            signal["confidence"] = round(random.uniform(0.65, 0.85), 2)
+        elif score >= 40:
+            signal["confidence"] = round(random.uniform(0.45, 0.65), 2)
+        elif score >= 20:
+            signal["confidence"] = round(random.uniform(0.25, 0.45), 2)
+        else:
+            signal["confidence"] = round(random.uniform(0.10, 0.25), 2)
+
+        all_signals.append(signal)
+
+    if not all_signals:
+        return
+
+    _generated_count = len(all_signals)
+    if htf_bias != "neutral":
+        all_signals = [s for s in all_signals if s.get("htf_aligned", True)]
+    else:
+        all_signals = []
+
+    _health["total_signals_generated"] = _health.get("total_signals_generated", 0) + _generated_count
+    _health["total_signals_kept"] = _health.get("total_signals_kept", 0) + len(all_signals)
+
+    if not all_signals:
+        return
+
+    for s in all_signals:
+        _signal_id_counter += 1
+        s["id"] = _signal_id_counter
+
+    _recent_signals = all_signals + _recent_signals
+    if len(_recent_signals) > 500:
+        _recent_signals = _recent_signals[:500]
+
+    try:
+        current_prices = dict(_latest_prices)
+        for s in all_signals:
+            sym = s.get("symbol", "")
+            live = _latest_prices.get(sym, 0.0)
+            if live > 0 and s.get("price", 0) > 0:
+                s["trigger_price"] = s["price"]
+                s["price"] = live
+
+        _demo_account.process_signals(all_signals, current_prices)
+
+        _recent_trades = _demo_account.get_closed_trades_list(500)
+        perf = _demo_account.get_performance()
+        perf["open_positions_count"] = len(_demo_account.open_positions)
+        open_positions = _demo_account.get_open_positions_list()
+        for pos_data in open_positions:
+            sym = pos_data["symbol"]
+            prec = _price_precision(sym)
+            cur_price = _latest_prices.get(sym, 0.0)
+            pos_data["current_price"] = round(cur_price, prec) if cur_price > 0 else 0.0
+            pos_data["entry_price"] = round(pos_data["entry_price"], prec)
+            pos_data["stop_loss"] = round(pos_data["stop_loss"], prec)
+            pos_data["take_profit"] = round(pos_data["take_profit"], prec)
+            if cur_price > 0 and pos_data["entry_price"] > 0:
+                if pos_data["side"] == "LONG":
+                    pos_data["unrealized_pnl"] = round((cur_price - pos_data["entry_price"]) * pos_data["quantity"], 2)
+                else:
+                    pos_data["unrealized_pnl"] = round((pos_data["entry_price"] - cur_price) * pos_data["quantity"], 2)
+        perf["open_positions"] = open_positions
+        _performance_cache = perf
+    except Exception as e:
+        logger.warning(f"[Binance] Demo account failed: {e}")
+
+    if discord_bot:
+        for s in all_signals:
+            stype = s.get("signal_type", "NEUTRAL")
+            score_val = s.get("score", 0)
+            in_kz = s.get("in_kill_zone", False)
+            if score_val >= 70 and in_kz:
+                try:
+                    await discord_bot.send_signal(s)
+                except Exception as e:
+                    logger.warning(f"[Binance] Discord send failed: {e}")
+
+    _health["last_cycle_time"] = datetime.utcnow().isoformat() + "Z"
+    logger.info(f"[Binance] {symbol} {tf_closed}: {len(all_signals)} signals")
+
+
+async def _binance_crypto_worker():
+    """
+    Real-time crypto worker using Binance WebSocket.
+    1. Backfills candle buffers from CoinGecko
+    2. Connects to Binance WS for 1m/5m/15m klines + ticker
+    3. On candle close -> runs ICT analysis immediately
+    4. On ticker -> updates _latest_prices
+    """
+    global _latest_prices, _latest_ticks
+
+    await _backfill_crypto_buffers()
+
+    url = f"{BINANCE_WS_URL}?streams={_binance_streams()}"
+    retry_delay = 1.0
+    last_tf_analysis: Dict[str, float] = {}
 
     while True:
-        # Reset Discord dedup each cycle so each KZ window gets fresh alerts
-        _last_discord_signal_type: Optional[str] = None
         try:
-            all_signals: List[Dict] = []
+            logger.info("[Binance] Connecting to WebSocket...")
+            async with websockets.connect(url, ping_interval=30) as ws:
+                logger.info("[Binance] WebSocket connected.")
+                retry_delay = 1.0
 
-            htf_bias = "neutral"
-            df_15m_backtest = pl.DataFrame()
-
-            for symbol in SIGNAL_SYMBOLS:
-                # Fetch 5m data once per symbol, resample to 15m locally
-                df_5m = await collector.fetch_historical(symbol, "5m", 288)
-                if df_5m.is_empty():
-                    logger.warning(f"No 5m candle data for {symbol}, skipping.")
-                    continue
-
-                df_15m = await _resample_5m_to_15m(df_5m)
-
-                # Save BTC 15m data for backtest
-                if symbol == "BTCUSDT":
-                    df_15m_backtest = df_15m
-
-                    # Compute HTF bias — use EMA crossover as primary method (catches trends
-                    # that strict HH/HL swing detection misses), fall back to swings then 15m.
+                async for raw in ws:
                     try:
-                        df_htf = await collector.fetch_historical(symbol, "1h", 168)
-                        if not df_htf.is_empty() and len(df_htf) >= 26:
-                            # Primary: EMA crossover (EMA12 vs EMA26, 0.5% threshold)
-                            htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
-                            # Secondary: swing structure for confirmation
-                            df_htf_swings = ict_ms.detect_swings(df_htf)
-                            swing_bias = determine_bias_from_swings(df_htf_swings)
-                            logger.info(
-                                f"HTF bias: {htf_bias.upper()} (EMA) — swings: {swing_bias.upper()}, "
-                                f"{len(df_htf)} candles from CoinGecko days=7"
-                            )
-                        elif not df_htf.is_empty() and len(df_htf) >= 8:
-                            # Not enough data for slow EMA, use swing detection
-                            df_htf = ict_ms.detect_swings(df_htf)
-                            htf_bias = determine_bias_from_swings(df_htf)
-                            logger.info(f"HTF bias: {htf_bias.upper()} (swing fallback, {len(df_htf)} candles)")
-                        else:
-                            # Fallback: use 15m data
-                            logger.warning(f"HTF bias: CoinGecko days=7 returned {len(df_htf) if not df_htf.is_empty() else 0} candles, falling back to 15m")
-                            df_fb = ict_ms.detect_swings(df_15m.clone())
-                            htf_bias = determine_bias_from_swings(df_fb)
-                            logger.info(f"HTF bias: {htf_bias.upper()} (15m fallback, {len(df_fb)} candles)")
-                    except Exception as e:
-                        logger.warning(f"HTF bias: CoinGecko days=7 failed ({e}), falling back to 15m")
-                        try:
-                            df_fb = ict_ms.detect_swings(df_15m.clone())
-                            htf_bias = determine_bias_from_swings(df_fb)
-                            logger.info(f"HTF bias: {htf_bias.upper()} (15m fallback after error, {len(df_fb)} candles)")
-                        except Exception as e2:
-                            logger.warning(f"HTF bias: 15m fallback also failed: {e2}")
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
 
-                # Analyze both timeframes
-                for tf, df in [("5m", df_5m), ("15m", df_15m)]:
+                    stream_name = msg.get("stream", "")
+                    data = msg.get("data", {})
+                    event_type = data.get("e", "")
 
-                    # Run ICT detection pipeline
-                    df = ict_ms.detect_swings(df)
-                    df = ict_ms.detect_bos_mss(df)
-                    df = ict_fvg.detect_fvgs(df)
-                    df = ict_ob.detect_order_blocks(df)
-                    df = ict_liquidity.detect_all(df)
-                    df = ict_sessions.detect_sessions(df)
-                    df = ict_pd.compute_zones(df)
-                    df = ict_breaker.detect_breaker_blocks(df)
+                    if event_type == "kline":
+                        k = data.get("k", {})
+                        symbol = data.get("s", "")
+                        tf = k.get("i", "")
+                        is_closed = k.get("x", False)
 
-                    # Check directional detection flags
-                    mss_type = None
-                    if "mss" in df.columns:
-                        latest_mss = df["mss"].drop_nulls().tail(1)
-                        if len(latest_mss) > 0:
-                            mss_type = latest_mss[0]
-                    sweep_type = None
-                    if "liquidity_sweep_type" in df.columns:
-                        latest_sweep = df["liquidity_sweep_type"].drop_nulls().tail(1)
-                        if len(latest_sweep) > 0:
-                            sweep_type = latest_sweep[0]
+                        if symbol not in BINANCE_SYMBOLS or tf not in BINANCE_TIMEFRAMES:
+                            continue
 
-                    # Generate signal with dual-scoring
-                    # 4H bias is passed so the engine knows the HTF direction
-                    signal = signal_engine.generate_signal(
-                        df, mss_type=mss_type, sweep_type=sweep_type,
-                        news_sentiment=0.0, timeframe=tf,
-                        htf_bias=htf_bias,
-                    )
-                    signal["symbol"] = symbol
-                    signal["id"] = None
+                        candle = {
+                            "timestamp": datetime.fromtimestamp(k["t"] / 1000),
+                            "open": float(k["o"]),
+                            "high": float(k["h"]),
+                            "low": float(k["l"]),
+                            "close": float(k["c"]),
+                            "volume": float(k["v"]),
+                        }
+                        _append_to_buffer(symbol, tf, candle)
+                        _latest_prices[symbol] = float(k["c"])
 
-                    # Attach ATR from the dataframe for demo account SL/TP calc
-                    if "atr" in df.columns:
-                        latest_atr = df["atr"].tail(1).to_list()
-                        signal["atr"] = latest_atr[0] if latest_atr and latest_atr[0] is not None else 0.0
-                    else:
-                        signal["atr"] = 0.0
+                        if is_closed:
+                            now = time.time()
+                            dedup_key = f"{symbol}_{tf}_{k['t']}"
+                            if dedup_key in last_tf_analysis:
+                                continue
+                            last_tf_analysis[dedup_key] = now
+                            if len(last_tf_analysis) > 1000:
+                                cutoff = now - 120
+                                last_tf_analysis = {k: v for k, v in last_tf_analysis.items() if v > cutoff}
 
-                    # Add confidence estimate
-                    score = signal["score"]
-                    if score >= 80:
-                        signal["confidence"] = round(random.uniform(0.85, 0.98), 2)
-                    elif score >= 60:
-                        signal["confidence"] = round(random.uniform(0.65, 0.85), 2)
-                    elif score >= 40:
-                        signal["confidence"] = round(random.uniform(0.45, 0.65), 2)
-                    elif score >= 20:
-                        signal["confidence"] = round(random.uniform(0.25, 0.45), 2)
-                    else:
-                        signal["confidence"] = round(random.uniform(0.10, 0.25), 2)
+                            logger.info(f"[Binance] {symbol} {tf} closed @ {candle['close']}")
+                            await _run_crypto_analysis(symbol, tf)
 
-                    all_signals.append(signal)
+                    elif event_type == "24hrTicker":
+                        symbol = data.get("s", "")
+                        if symbol not in BINANCE_SYMBOLS:
+                            continue
+                        price = float(data.get("c", 0))
+                        if price > 0:
+                            _latest_prices[symbol] = price
+                            _latest_ticks[symbol] = {
+                                "symbol": symbol,
+                                "price": price,
+                                "change_24h": round(float(data.get("P", 0)), 2),
+                                "high_24h": float(data.get("h", price)),
+                                "low_24h": float(data.get("l", price)),
+                                "volume": round(float(data.get("v", 0)), 2),
+                                "timestamp": datetime.utcnow().isoformat() + "Z",
+                            }
 
-            # Track generated count BEFORE filtering for health metrics
-            _generated_count = len(all_signals)
-
-            # ── Filter signals that don't align with 4H bias ───────────
-            if htf_bias != "neutral":
-                filtered = []
-                for s in all_signals:
-                    if s.get("htf_aligned", True):
-                        filtered.append(s)
-                    else:
-                        logger.info(
-                            f"Filtered {s.get('symbol','')} {s.get('signal_type','')} "
-                            f"(4H={htf_bias}) — not aligned"
-                        )
-                if len(filtered) < len(all_signals):
-                    logger.info(
-                        f"4H bias filter: kept {len(filtered)}/{len(all_signals)} signals "
-                        f"(4H is {htf_bias.upper()})"
-                    )
-                all_signals = filtered
-            else:
-                # 4H is neutral — no clear direction, skip all trading
-                logger.info(
-                    f"4H bias is NEUTRAL — skipping all {len(all_signals)} signals "
-                    f"until a clear direction forms"
-                )
-                all_signals = []
-
-            # ── Update health metrics with generated vs kept counts ────
-            _health["total_signals_generated"] = _health.get("total_signals_generated", 0) + _generated_count
-            _health["total_signals_kept"] = _health.get("total_signals_kept", 0) + len(all_signals)
-
-            # Assign IDs and store
-            for s in all_signals:
-                _signal_id_counter += 1
-                s["id"] = _signal_id_counter
-
-            _recent_signals = all_signals + _recent_signals
-            if len(_recent_signals) > 500:
-                _recent_signals = _recent_signals[:500]
-
-            # ── Demo Account: forward-test signals with 1% risk, ATR SL, 1:2 RR ──
-            # Use live prices from CoinGecko poller (updated every 120s) — NOT candle closes
-            # which can be 5+ minutes stale by the time the signal cycle runs.
-            try:
-                current_prices = dict(_latest_prices)  # gets BTC, ETH, forex from price workers
-
-                # Before processing, update each signal's price to the current live price
-                # so the demo account enters at market price, not a stale candle close.
-                # Save the original trigger price for Discord display.
-                for s in all_signals:
-                    sym = s.get("symbol", "")
-                    live = _latest_prices.get(sym, 0.0)
-                    if live > 0 and s.get("price", 0) > 0:
-                        s["trigger_price"] = s["price"]  # preserve candle close for Discord
-                        s["price"] = live  # use live price for entry
-
-                # Check risk limits before processing signals
-                risk_manager.update_state(
-                    daily_pnl=demo_account.daily_loss,
-                    open_positions=len(demo_account.open_positions),
-                )
-                
-                # Process signals through the demo account
-                demo_account.process_signals(all_signals, current_prices)
-
-                # Replace trade history fresh each cycle (no duplicates)
-                _recent_trades = demo_account.get_closed_trades_list(500)
-                perf = demo_account.get_performance()
-                perf["open_positions_count"] = len(demo_account.open_positions)
-                # Enrich open positions with current prices for live P&L display
-                open_positions = demo_account.get_open_positions_list()
-                for pos_data in open_positions:
-                    sym = pos_data["symbol"]
-                    prec = _price_precision(sym)
-                    cur_price = _latest_prices.get(sym, 0.0)
-                    pos_data["current_price"] = round(cur_price, prec) if cur_price > 0 else 0.0
-                    # Re-round entry/SL/TP with symbol-appropriate precision
-                    pos_data["entry_price"] = round(pos_data["entry_price"], prec)
-                    pos_data["stop_loss"] = round(pos_data["stop_loss"], prec)
-                    pos_data["take_profit"] = round(pos_data["take_profit"], prec)
-                    if cur_price > 0 and pos_data["entry_price"] > 0:
-                        if pos_data["side"] == "LONG":
-                            pos_data["unrealized_pnl"] = round((cur_price - pos_data["entry_price"]) * pos_data["quantity"], 2)
-                        else:
-                            pos_data["unrealized_pnl"] = round((pos_data["entry_price"] - cur_price) * pos_data["quantity"], 2)
-                perf["open_positions"] = open_positions
-                _performance_cache = perf
-
-                open_count = len(demo_account.open_positions)
-                if open_count > 0:
-                    logger.info(f"Demo account: {open_count} open position(s)")
-            except Exception as e:
-                logger.warning(f"Demo account processing failed: {e}")
-
-            # ── Send strong signals to Discord (only during kill zones) ──
-            if discord_bot:
-                for s in all_signals:
-                    stype = s.get("signal_type", "NEUTRAL")
-                    score_val = s.get("score", 0)
-                    in_kz = s.get("in_kill_zone", False)
-                    if score_val >= 70 and stype != _last_discord_signal_type:
-                        if in_kz:
-                            _last_discord_signal_type = stype
-                            try:
-                                await discord_bot.send_signal(s)
-                            except Exception as e:
-                                logger.warning(f"Discord send failed: {e}")
-                        else:
-                            logger.info(
-                                f"Skipping Discord alert for {s.get('symbol','')} "
-                                f"{stype} (score={score_val}) — outside kill zone"
-                            )
-
-            # Update health tracking
-            _health["htf_bias"] = htf_bias
-            _health["last_cycle_time"] = datetime.utcnow().isoformat() + "Z"
-            _health["cycle_count"] = _health.get("cycle_count", 0) + 1
-            _health["total_trades_executed"] = len(_recent_trades)
-            _health["status"] = "running"
-
-            logger.info(
-                f"Signal cycle complete: {len(all_signals)} signals across "
-                f"{len(TIMEFRAMES)} timeframes, {len(_recent_trades)} trades."
-            )
-
+        except websockets.exceptions.WebSocketException as e:
+            logger.warning(f"[Binance] WS error: {e}. Reconnecting in {retry_delay:.0f}s...")
         except Exception as e:
-            logger.warning(f"Signal worker error: {e}. Retrying in 60s...")
+            logger.warning(f"[Binance] WS unexpected: {e}. Reconnecting in {retry_delay:.0f}s...")
             _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
-            _health["last_error_message"] = str(e)
-            _health["status"] = "error"
+            _health["last_error_message"] = f"Binance WS: {e}"
 
-        await asyncio.sleep(CYCLE_INTERVAL)
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, 60.0)
+
+
+# ── HTF Bias Worker (replaces old timer-based signal worker) ────────────
+
+async def _htf_bias_worker():
+    """
+    Periodically fetches 1h data from CoinGecko and updates HTF bias.
+    Runs every 15 minutes. The Binance crypto worker reads _health["htf_bias"].
+    """
+    global _health
+    collector = CoinGeckoCollector(symbols=["BTCUSDT"], timeframes=["1h"])
+
+    while True:
+        try:
+            df_htf = await collector.fetch_historical("BTCUSDT", "1h", 168)
+            if not df_htf.is_empty() and len(df_htf) >= 26:
+                htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+                df_swings = _ict_ms.detect_swings(df_htf)
+                swing_bias = determine_bias_from_swings(df_swings)
+                logger.info(f"[Bias] HTF: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}, {len(df_htf)} candles")
+                _health["htf_bias"] = htf_bias
+                _health["cycle_count"] = _health.get("cycle_count", 0) + 1
+            elif not df_htf.is_empty() and len(df_htf) >= 8:
+                df_swings = _ict_ms.detect_swings(df_htf)
+                htf_bias = determine_bias_from_swings(df_swings)
+                _health["htf_bias"] = htf_bias
+                logger.info(f"[Bias] HTF: {htf_bias.upper()} (swing fallback, {len(df_htf)} candles)")
+            else:
+                logger.warning(f"[Bias] Not enough data ({len(df_htf)} candles), keeping current")
+        except Exception as e:
+            logger.warning(f"[Bias] Update failed: {e}")
+            _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
+            _health["last_error_message"] = f"Bias: {e}"
+
+        _health["status"] = "running"
+        await asyncio.sleep(900)
 
 
 async def _news_worker():
@@ -746,7 +805,7 @@ async def get_health():
         "btc_price": _latest_prices.get("BTCUSDT", 0),
         "eth_price": _latest_prices.get("ETHUSDT", 0),
         "forex_prices_available": {s: _latest_prices.get(s, 0) for s in FOREX_SYMBOLS},
-        "twelve_data_connected": TWELVEDATA_API_KEY and bool(_latest_ticks),
+        "twelve_data_connected": TWELVEDATA_API_KEY and any(s in _latest_ticks for s in FOREX_SYMBOLS),
     }
 
 
@@ -957,57 +1016,6 @@ async def _twelve_data_worker():
         retry_delay = min(retry_delay * 2, 60.0)
 
 
-# ── CoinGecko price polling worker (crypto) ──────────────────────────
-
-async def _crypto_price_worker():
-    """
-    Background task: poll CoinGecko's simple/price endpoint every 120s
-    and update _latest_ticks / _latest_prices with current crypto prices.
-    CoinGecko doesn't offer WebSocket, so we poll instead.
-    Uses a light throttle to stay under CoinGecko's free tier rate limit.
-    """
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={COINGECKO_IDS}&vs_currencies=usd"
-    _last_price_fetch = 0.0
-
-    while True:
-        try:
-            # Light throttle: at least 2s between price calls
-            now = time.time()
-            elapsed = now - _last_price_fetch
-            if elapsed < 2.0:
-                await asyncio.sleep(2.0 - elapsed)
-
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url)
-                _last_price_fetch = time.time()
-                if resp.status_code != 200:
-                    logger.warning(f"CoinGecko price: HTTP {resp.status_code}")
-                    await asyncio.sleep(120)
-                    continue
-
-                data = resp.json()
-                coin_map = {"bitcoin": "BTCUSDT", "ethereum": "ETHUSDT"}
-                for coin_id, info in data.items():
-                    symbol = coin_map.get(coin_id)
-                    if symbol and "usd" in info:
-                        price = float(info["usd"])
-                        _latest_prices[symbol] = price
-                        _latest_ticks[symbol] = {
-                            "symbol": symbol,
-                            "price": price,
-                            "change_24h": 0.0,   # not available from simple/price
-                            "high_24h": price,
-                            "low_24h": price,
-                            "volume": 0,
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
-                        }
-
-        except Exception as e:
-            logger.warning(f"CoinGecko price poll error: {e}")
-
-        await asyncio.sleep(120)
-
-
 # ── Dashboard static files ────────────────────────────────────────────
 from fastapi.staticfiles import StaticFiles
 import os as _os
@@ -1026,7 +1034,7 @@ else:
 async def _stream_prices(websocket: WebSocket):
     """Stream prices to the connected dashboard client.
 
-    Crypto symbols come from CoinGecko poll (_crypto_price_worker).
+    Crypto symbols come from Binance WS ticker (_binance_crypto_worker).
     Forex symbols come from Twelve Data WS (_twelve_data_worker)
     when the API key is configured; otherwise they fall back to mock.
     """
