@@ -733,11 +733,15 @@ async def get_backtest_data(
     symbol: str,
     days: int = Query(30, ge=1, le=90),
     bar: str = Query("5m", regex="^(1m|5m|15m|1H|4H|1D)$"),
+    before: Optional[str] = Query(None, description="ISO timestamp to end the window (default: now)"),
 ):
     """
     Fetch many days of historical OHLCV data for backtesting.
     Paginates OKX's history-candles endpoint server-side.
     Returns candles oldest-first, no API key needed.
+
+    Optionally specify `before` (ISO date string like "2025-06-15") to
+    fetch data ending at that date instead of the current time.
     """
     symbol = symbol.upper()
     if symbol not in {"BTCUSDT", "ETHUSDT"}:
@@ -747,7 +751,11 @@ async def get_backtest_data(
         per_day = OKX_BAR_CAPACITY.get(bar, 288)
         total_needed = days * per_day
         all_candles: List[Dict] = []
-        after_ts = None  # start from newest
+        # Start from the `before` timestamp if provided, otherwise newest
+        after_ts = None
+        if before:
+            before_ts = before.replace("Z", "+00:00") if isinstance(before, str) else before
+            after_ts = datetime.fromisoformat(before_ts)
 
         while len(all_candles) < total_needed:
             batch = await _okx_fetch_history(symbol, bar, 100, after=after_ts)

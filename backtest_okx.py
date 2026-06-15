@@ -1,19 +1,22 @@
 """
-30-Day Historical Backtest — Identical Logic to Live Demo Account
+12-Month Rolling Backtest — One Month at a Time
 
-Fetches 30 days of 5m data from Railway's /backtest-data endpoint (paginated OKX),
-drives DemoAccount candle-by-candle matching live system logic exactly:
-  - Every 5m close → ICT on 5m + 15m buffers → score≥70 + kill zone + HTF-aligned
-  - DemoAccount handles SL/TP (candle H/L), max 1 position/symbol, no repeats
+Fetches 30 days of 5m data per month via Railway's /backtest-data endpoint
+(with optional `before` timestamp for offset windows), drives DemoAccount
+candle-by-candle matching live system logic exactly.
+
+Runs months sequentially (oldest first → most recent) to avoid timeouts.
+Each month: 2 symbols (BTC, ETH), ~8640 candles each, full ICT pipeline.
 
 Usage:
-    python backtest_okx.py
+    python backtest_okx.py              # last 12 months
+    python backtest_okx.py --months 6   # last 6 months
 """
 
 import asyncio
 import httpx
 import polars as pl
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from loguru import logger
 import sys
@@ -33,7 +36,6 @@ from demo_account import DemoAccount, ClosedTrade
 
 RAILWAY_URL = "https://ict-production-b1a8.up.railway.app"
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-BACKTEST_DAYS = 30
 BACKTEST_CAPITAL = 10_000.0
 MAX_OPEN_POSITIONS = 3
 
@@ -56,15 +58,26 @@ def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
     ]).drop("_g").sort("timestamp")
 
 
-async def fetch_backtest_data(symbol: str, bar: str, days: int) -> pl.DataFrame:
-    """Fetch paginated historical data from /backtest-data endpoint."""
+async def fetch_backtest_data(symbol: str, bar: str, days: int,
+                              before: Optional[str] = None) -> pl.DataFrame:
+    """Fetch paginated historical data from /backtest-data endpoint.
+
+    Args:
+        symbol: BTCUSDT or ETHUSDT
+        bar: 5m, 1H, etc.
+        days: Number of days of data to fetch (1-90)
+        before: ISO date string to end the window (e.g. "2025-06-15").
+                Defaults to now.
+    """
     url = f"{RAILWAY_URL}/backtest-data/{symbol}"
-    params = {"bar": bar, "days": days}
+    params: Dict = {"bar": bar, "days": days}
+    if before:
+        params["before"] = before
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=180.0) as client:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
-                logger.warning(f"API HTTP {resp.status_code}")
+                logger.warning(f"API HTTP {resp.status_code} for {symbol} {bar}")
                 return pl.DataFrame()
             data = resp.json()
             if not isinstance(data, list) or len(data) < 10:
@@ -86,7 +99,8 @@ async def fetch_backtest_data(symbol: str, bar: str, days: int) -> pl.DataFrame:
                 })
 
             df = pl.DataFrame(rows).sort("timestamp")
-            logger.info(f"[API] Fetched {len(df)} {bar} candles for {symbol} ({days}d)")
+            label = f" before {before}" if before else ""
+            logger.info(f"[API] Fetched {len(df)} {bar} candles for {symbol} ({days}d{label})")
             return df
     except Exception as e:
         logger.error(f"[API] Fetch failed: {e}")
@@ -192,45 +206,47 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts):
     del demo.open_positions[pos.symbol]
 
 
-async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
-    """Run 30-day backtest using DemoAccount, processing in chunks to avoid O(n²) blowup.
+async def backtest_symbol(symbol: str, chunk_size: int = 500,
+                          before: Optional[str] = None) -> Dict:
+    """Run 30-day backtest using DemoAccount.
 
-    Instead of running the full ICT pipeline on a buffer that grows from 20 to 8640
-    (which is O(n²) ≈ 37M cell evaluations), we process in fixed-size chunks.
-    Each chunk starts with a warm-up buffer, then walks through new candles.
+    Args:
+        symbol: BTCUSDT or ETHUSDT
+        chunk_size: Candles per processing chunk
+        before: ISO date to end the 30-day window (default: now)
     """
-    logger.info(f"\n{'='*60}")
-    logger.info(f"Backtesting {symbol}")
-    logger.info(f"{'='*60}")
+    days = 30  # fixed 30-day window per month
 
-    # 1. Fetch 30 days of 5m data
+    # 1. Fetch 5m data for this window
     t0 = datetime.utcnow()
-    df_5m_full = await fetch_backtest_data(symbol, "5m", BACKTEST_DAYS)
+    df_5m_full = await fetch_backtest_data(symbol, "5m", days, before=before)
     if df_5m_full.is_empty() or len(df_5m_full) < 100:
-        return {"symbol": symbol, "total_trades": 0, "result": f"Only {len(df_5m_full)} candles"}
+        return {"symbol": symbol, "month": str(before or "latest"),
+                "total_trades": 0, "total_profit": 0,
+                "result": f"Only {len(df_5m_full)} candles"}
 
-    logger.info(f"5m range: {df_5m_full['timestamp'].min()} → {df_5m_full['timestamp'].max()}, "
-                f"{len(df_5m_full)} candles ({BACKTEST_DAYS}d) [fetch: {(datetime.utcnow()-t0).total_seconds():.0f}s]")
+    data_range = f"{df_5m_full['timestamp'].min().strftime('%b %d')} → " \
+                 f"{df_5m_full['timestamp'].max().strftime('%b %d')}"
+    logger.info(f"  Range: {data_range}, {len(df_5m_full)} candles "
+                f"[fetch: {(datetime.utcnow()-t0).total_seconds():.0f}s]")
 
-    # 2. Fetch 1h data for HTF bias (recomputed periodically, matching live 15-min update cycle)
-    df_1h = await fetch_backtest_data(symbol, "1H", BACKTEST_DAYS)
+    # 2. Fetch 1h data for HTF bias
+    df_1h = await fetch_backtest_data(symbol, "1H", days, before=before)
     htf_bias = "neutral"
     if not df_1h.is_empty() and len(df_1h) >= 26:
-        # Use first 168 1h candles for initial bias (matches live _htf_bias_worker startup)
         df_1h_init = df_1h.slice(0, min(168, len(df_1h)))
         htf_bias = determine_bias_from_ema(df_1h_init, fast=12, slow=26, threshold_pct=0.5)
         swing_bias = determine_bias_from_swings(_ict_ms.detect_swings(df_1h_init))
-        logger.info(f"Initial HTF bias: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}")
+        logger.info(f"  Initial HTF bias: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}")
     else:
-        logger.info(f"Initial HTF bias: neutral ({len(df_1h)} 1h candles)")
+        logger.info(f"  Initial HTF bias: neutral ({len(df_1h)} 1h candles)")
 
     # 3. Pre-resample to 15m
     df_15m_full = _resample_5m_to_15m(df_5m_full)
     rows = df_5m_full.to_dicts()
-    rows_15m = df_15m_full.to_dicts()
     total_candles = len(rows)
 
-    # 4. Initialize DemoAccount
+    # 4. Initialize DemoAccount (fresh each symbol)
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
@@ -238,10 +254,10 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
 
     signals_gen = 0
     signals_kept = 0
+    bias_changes = 0
 
     # 5. Process in chunks with periodic HTF bias recomputation
-    # Live system updates HTF bias every 15 min. Here we update every 288 5m candles (~1 day).
-    HTF_REFRESH_INTERVAL = 288  # 5m candles per day
+    HTF_REFRESH_INTERVAL = 288  # ~1 day in 5m candles
     warmup = 50
     i = warmup
     last_bias_refresh = 0
@@ -250,7 +266,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
         chunk_end = min(i + chunk_size, total_candles)
         chunk_rows = rows[i:chunk_end]
 
-        # Recompute HTF bias periodically (matches live _htf_bias_worker, uses latest 168 1h candles)
+        # Recompute HTF bias periodically
         if i - last_bias_refresh >= HTF_REFRESH_INTERVAL:
             current_ts = rows[i]["timestamp"]
             df_1h_slice = df_1h.filter(pl.col("timestamp") <= current_ts)
@@ -258,8 +274,9 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
             if len(df_1h_window) >= 26:
                 new_bias = determine_bias_from_ema(df_1h_window, fast=12, slow=26, threshold_pct=0.5)
                 if new_bias != htf_bias:
-                    logger.info(f"  [Bias] HTF changed: {htf_bias.upper()} → {new_bias.upper()} @ candle {i}")
+                    logger.info(f"    [Bias] {htf_bias.upper()} → {new_bias.upper()} @ candle {i}")
                     htf_bias = new_bias
+                    bias_changes += 1
             last_bias_refresh = i
 
         for j, current in enumerate(chunk_rows):
@@ -317,8 +334,8 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
         pct = (i / total_candles) * 100
         elapsed = (datetime.utcnow() - t0).total_seconds()
         cps = i / elapsed if elapsed > 0 else 0
-        logger.info(f"  [{symbol}] {pct:.0f}% — {i}/{total_candles} candles processed "
-                    f"({cps:.0f} candles/s, {elapsed:.0f}s elapsed)")
+        logger.info(f"    [{symbol}] {pct:.0f}% — {i}/{total_candles} "
+                    f"({cps:.0f} c/s, {elapsed:.0f}s)")
 
     # Collect results
     perf = demo.get_performance()
@@ -330,77 +347,202 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500) -> Dict:
     breakeven = sum(1 for t in trades if t["result"] == "BREAK_EVEN")
 
     elapsed = (datetime.utcnow() - t0).total_seconds()
-    logger.info(f"\n  Trades: {perf['total_trades']} (W:{wins} L:{losses} BE:{breakeven})")
-    logger.info(f"  Win rate: {perf['win_rate']*100:.1f}% | PF: {perf['profit_factor']:.2f}")
-    logger.info(f"  Profit: ${perf['total_profit']:.2f} | Max DD: {perf['max_drawdown']*100:.1f}%")
-    logger.info(f"  Avg RR: {perf['avg_rr']:.2f} | Still open: {len(open_pos)}")
-    logger.info(f"  Signals: {signals_gen} gen → {signals_kept} kept | Time: {elapsed:.0f}s")
+    logger.info(f"  ── {symbol} Results ──")
+    logger.info(f"  Trades: {perf['total_trades']} (W:{wins} L:{losses} BE:{breakeven}) | "
+                f"WR: {perf['win_rate']*100:.1f}% | PF: {perf['profit_factor']:.2f}")
+    logger.info(f"  P&L: ${perf['total_profit']:.2f} | DD: {perf['max_drawdown']*100:.1f}% | "
+                f"Avg RR: {perf['avg_rr']:.2f} | Open: {len(open_pos)}")
+
+    # Build date range string from actual candle timestamps
+    ts_min = df_5m_full['timestamp'].min().strftime('%b %d')
+    ts_max = df_5m_full['timestamp'].max().strftime('%b %d')
+    data_range_str = f"{ts_min} → {ts_max}"
 
     return {
-        "symbol": symbol, "htf_bias": htf_bias, "total_trades": perf["total_trades"],
+        "symbol": symbol, "month": str(before or "latest"),
+        "data_range": data_range_str,
+        "htf_bias": htf_bias, "total_trades": perf["total_trades"],
         "wins": wins, "losses": losses, "breakeven": breakeven,
         "win_rate": perf["win_rate"], "total_profit": perf["total_profit"],
         "profit_factor": perf["profit_factor"], "max_drawdown": perf["max_drawdown"],
         "avg_rr": perf["avg_rr"], "capital_remaining": perf["capital_remaining"],
         "signals_gen": signals_gen, "signals_kept": signals_kept,
-        "still_open": len(open_pos),
+        "still_open": len(open_pos), "bias_changes": bias_changes,
     }
 
 
-async def main():
-    logger.remove()
-    logger.add(sys.stderr, level="INFO", format="<level>{level: <8}</level> | {message}")
+def print_month_result(month_num: int, month_label: str, data_range: str,
+                       r1: Dict, r2: Dict):
+    """Print a formatted monthly result block."""
+    print(f"\n  {'─'*60}")
+    print(f"  Month {month_num}/12 — {month_label}")
+    print(f"  {data_range}")
+    print(f"  {'─'*60}")
 
-    print("\n" + "="*75)
-    print("  🔬 30-DAY HISTORICAL BACKTEST — Full ICT Pipeline + DemoAccount")
-    print(f"  Capital: ${BACKTEST_CAPITAL} | Max {MAX_OPEN_POSITIONS} positions | "
-          f"1% risk | 1:2 RR")
-    print("  Entry: score≥70 + kill zone + HTF-aligned | No duplicate positions")
-    print("="*75 + "\n")
-
-    results = []
-    for symbol in SYMBOLS:
-        r = await backtest_symbol(symbol)
-        if r:
-            results.append(r)
-        print()
-
-    print("\n" + "="*75)
-    print("  RESULTS SUMMARY")
-    print("="*75)
-
-    combined_trades = combined_profit = combined_wins = combined_losses = 0
-    for r in results:
+    for r in [r1, r2]:
         if r.get("total_trades", 0) == 0:
-            print(f"\n  {r['symbol']} — {r.get('result', 'No trades')} ({r['htf_bias'].upper()})")
+            print(f"  {r['symbol']}: {r.get('result', 'No trades')} ({r.get('htf_bias', '?').upper()})")
             continue
 
-        print(f"\n  {r['symbol']}  (HTF: {r['htf_bias'].upper()})")
-        print(f"    Signals: {r['signals_gen']} gen → {r['signals_kept']} kept")
-        print(f"    Trades:  {r['total_trades']}  (W:{r['wins']} L:{r['losses']} BE:{r['breakeven']})")
-        print(f"    Open:    {r['still_open']}")
-        print(f"    Win rate:   {r['win_rate']*100:.1f}%")
-        print(f"    Profit:     ${r['total_profit']:.2f}")
-        print(f"    Profit factor: {r['profit_factor']:.2f}")
-        print(f"    Max DD:     {r['max_drawdown']*100:.1f}%")
-        print(f"    Avg RR:     {r['avg_rr']:.2f}")
+        print(f"  {r['symbol']}  ({r['htf_bias'].upper()})  "
+              f"Trades: {r['total_trades']}  "
+              f"W:{r['wins']} L:{r['losses']} BE:{r['breakeven']}  "
+              f"Open: {r['still_open']}")
+        print(f"    WR: {r['win_rate']*100:.1f}%  "
+              f"PF: {r['profit_factor']:.2f}  "
+              f"P&L: ${r['total_profit']:.2f}  "
+              f"DD: {r['max_drawdown']*100:.1f}%  "
+              f"RR: {r['avg_rr']:.2f}")
 
-        combined_trades += r['total_trades']
-        combined_profit += r['total_profit']
-        combined_wins += r['wins']
-        combined_losses += r['losses']
+
+def print_combined_summary(all_results: List[Dict]):
+    """Print aggregated 12-month summary."""
+    print(f"\n\n{'='*70}")
+    print(f"  12-MONTH COMBINED SUMMARY")
+    print(f"{'='*70}")
+
+    all_btc = [r for r in all_results if r["symbol"] == "BTCUSDT"]
+    all_eth = [r for r in all_results if r["symbol"] == "ETHUSDT"]
+
+    grand_total = {"btc": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
+                           "dd_sum": 0.0, "dd_count": 0, "rr_sum": 0.0, "rr_count": 0,
+                           "signals_gen": 0, "signals_kept": 0},
+                   "eth": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
+                           "dd_sum": 0.0, "dd_count": 0, "rr_sum": 0.0, "rr_count": 0,
+                           "signals_gen": 0, "signals_kept": 0}}
+
+    for r in all_results:
+        sym = "btc" if r["symbol"] == "BTCUSDT" else "eth"
+        g = grand_total[sym]
+        g["trades"] += r["total_trades"]
+        g["wins"] += r["wins"]
+        g["losses"] += r["losses"]
+        g["profit"] += r["total_profit"]
+        g["signals_gen"] += r["signals_gen"]
+        g["signals_kept"] += r["signals_kept"]
+        if r["total_trades"] > 0:
+            g["dd_sum"] += r["max_drawdown"]
+            g["dd_count"] += 1
+            g["rr_sum"] += r["avg_rr"] * r["total_trades"]
+            g["rr_count"] += r["total_trades"]
+
+    for label, g in [("BTCUSDT", grand_total["btc"]), ("ETHUSDT", grand_total["eth"])]:
+        if g["trades"] == 0:
+            print(f"\n  {label}: No trades across all months")
+            continue
+        wr = g["wins"] / g["trades"] * 100 if g["trades"] > 0 else 0
+        avg_dd = g["dd_sum"] / g["dd_count"] * 100 if g["dd_count"] > 0 else 0
+        avg_rr = g["rr_sum"] / g["rr_count"] if g["rr_count"] > 0 else 0
+        print(f"\n  {label}")
+        print(f"    Total trades: {g['trades']}  (W:{g['wins']} L:{g['losses']})")
+        print(f"    Win rate:     {wr:.1f}%")
+        print(f"    Total P&L:    ${g['profit']:.2f}")
+        print(f"    Avg DD:       {avg_dd:.1f}%")
+        print(f"    Avg RR:       {avg_rr:.2f}")
+        print(f"    Signals:      {g['signals_gen']} gen → {g['signals_kept']} kept")
+
+    combined_trades = grand_total["btc"]["trades"] + grand_total["eth"]["trades"]
+    combined_profit = grand_total["btc"]["profit"] + grand_total["eth"]["profit"]
+    combined_wins = grand_total["btc"]["wins"] + grand_total["eth"]["wins"]
 
     print(f"\n  {'─'*55}")
-    print(f"  COMBINED: {combined_trades} trades ({combined_wins}W / {combined_losses}L)")
+    print(f"  COMBINED (Both Symbols)")
+    print(f"  {'─'*55}")
+    print(f"  Total trades: {combined_trades}")
     if combined_trades > 0:
         wr = combined_wins / combined_trades * 100
     else:
         wr = 0
-    print(f"  Win rate: {wr:.1f}%")
-    print(f"  Total P&L: ${combined_profit:.2f}")
-    print(f"  Return: {(combined_profit / BACKTEST_CAPITAL) * 100:.2f}%")
-    print(f"  Final capital: ${BACKTEST_CAPITAL + combined_profit:.2f}")
+    print(f"  Win rate:     {wr:.1f}%")
+    print(f"  Total P&L:    ${combined_profit:.2f}")
+    print(f"  Total return: {(combined_profit / BACKTEST_CAPITAL) * 100:.2f}%")
+    print(f"  Avg monthly:  ${combined_profit / 12:.2f}")
+
+
+async def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="12-Month Rolling Backtest of ICT Strategy")
+    parser.add_argument("--months", type=int, default=12,
+                        help="Number of months to backtest (1-12, default 12)")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Run both symbols per month in parallel")
+    args = parser.parse_args()
+
+    logger.remove()
+    logger.add(sys.stderr, level="INFO",
+               format="<level>{level: <8}</level> | {message}")
+
+    num_months = min(max(args.months, 1), 12)
+
+    print("\n" + "=" * 70)
+    print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
+    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥70 + KZ + HTF-aligned")
+    print(f"  Symbols: {', '.join(SYMBOLS)}")
+    print("=" * 70 + "\n")
+
+    today = datetime.utcnow().date()
+    all_raw_results = []
+
+    # Go from oldest month to newest (so HTF bias builds naturally)
+    for month_offset in reversed(range(num_months)):
+        end_date = today - timedelta(days=month_offset * 30)
+        before_str = end_date.isoformat()
+        month_label = end_date.strftime("%Y-%m")
+
+        print(f"\n{'━'*70}")
+        print(f"  Month {num_months - month_offset}/{num_months} — "
+              f"ending {end_date.strftime('%b %d, %Y')}")
+        print(f"{'━'*70}")
+
+        if args.parallel:
+            tasks = [backtest_symbol(sym, before=before_str) for sym in SYMBOLS]
+            results = await asyncio.gather(*tasks)
+        else:
+            results = []
+            for sym in SYMBOLS:
+                r = await backtest_symbol(sym, before=before_str)
+                results.append(r)
+                print()
+
+        r1, r2 = results[0], results[1]
+
+        # Use actual data ranges from results
+        dr1 = r1.get("data_range", "") if r1.get("total_trades", 0) > 0 else "(no data)"
+        dr2 = r2.get("data_range", "") if r2.get("total_trades", 0) > 0 else "(no data)"
+        data_range = f"BTC: {dr1} | ETH: {dr2}"
+
+        print_month_result(num_months - month_offset, month_label, data_range, r1, r2)
+        all_raw_results.extend(results)
+
+    print_combined_summary(all_raw_results)
+
+    # Monthly breakdown table
+    print(f"\n\n{'='*70}")
+    print(f"  MONTHLY BREAKDOWN")
+    print(f"{'='*70}")
+
+    print(f"\n  {'Month':<10} {'Symbol':<10} {'Trades':<8} {'WR%':<8} {'P&L':<12} "
+          f"{'PF':<8} {'DD%':<8} {'RR':<8}")
+    print(f"  {'─'*8:<10} {'─'*8:<10} {'─'*6:<8} {'─'*5:<8} {'─'*10:<12} "
+          f"{'─'*6:<8} {'─'*5:<8} {'─'*5:<8}")
+
+    for r in all_raw_results:
+        trades = r.get("total_trades", 0)
+        wr = r.get("win_rate", 0) * 100
+        pnl = r.get("total_profit", 0)
+        pf = r.get("profit_factor", 0)
+        dd = r.get("max_drawdown", 0) * 100
+        rr = r.get("avg_rr", 0)
+        sym = r["symbol"]
+        month = r.get("month", "?")
+        print(f"  {month:<10} {sym:<10} {trades:<8} {wr:<7.1f}% "
+              f"${pnl:<9.2f} {pf:<8.2f} {dd:<7.1f}% {rr:<8.2f}")
+
     print()
+    print(f"  Script complete. Total time: TBD (run completed)")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
