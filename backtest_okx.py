@@ -273,7 +273,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
-        sl_multiplier=1.0 if is_btc else 2.0,
+        sl_multiplier=0.5 if is_btc else 2.0,
         reentry_cooldown_minutes=0 if is_btc else 60,
         symbol_min_scores={symbol.upper(): symbol_min_score},
     )
