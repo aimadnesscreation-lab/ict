@@ -1,15 +1,5 @@
 //@version=5
-strategy(
-  title="ICT Dual-Score Strategy",
-  overlay=true,
-  initial_capital=10000,
-  default_qty_type=strategy.percent_of_equity,
-  default_qty_value=100,
-  currency=currency.USD,
-  commission_type=strategy.commission.percent,
-  commission_value=0.04,
-  pyramiding=1,
-)
+strategy(title="ICT Dual-Score Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.04, pyramiding=1)
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  📐 USER INPUTS — All configurable from TradingView settings panel
@@ -243,11 +233,7 @@ netScore = bullishScore - bearishScore
 confidenceStrength = math.max(bullishScore, bearishScore)
 
 // Signal type from net score
-signalType = netScore >= 60 ? "STRONG_BUY"
-           : netScore >= 30 ? "BUY"
-           : netScore > -30 ? "NEUTRAL"
-           : netScore > -60 ? "SELL"
-           : "STRONG_SELL"
+signalType = netScore >= 60 ? "STRONG_BUY" : netScore >= 30 ? "BUY" : netScore > -30 ? "NEUTRAL" : netScore > -60 ? "SELL" : "STRONG_SELL"
 
 // HTF alignment check
 htfAligned = true
@@ -366,8 +352,7 @@ if showScoreTable and barstate.islast
     table.cell(tbl, 1, 9,  str.tostring(netScore), text_color=netC, text_size=size.small, text_halign=text.align_right)
 
     // Signal
-    sigC = signalType == "STRONG_BUY" or signalType == "BUY" ? color.green
-         : signalType == "STRONG_SELL" or signalType == "SELL" ? color.red : color.gray
+    sigC = signalType == "STRONG_BUY" or signalType == "BUY" ? color.green : signalType == "STRONG_SELL" or signalType == "SELL" ? color.red : color.gray
     table.cell(tbl, 0, 10, signalType,         text_color=sigC, text_size=size.small, text_halign=text.align_center)
     table.cell(tbl, 1, 10, "(" + str.tostring(confidenceStrength) + ")", text_color=sigC, text_size=size.tiny)
 
