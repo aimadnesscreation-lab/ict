@@ -49,15 +49,6 @@ _ict_breaker = BreakerBlockDetector()
 _signal_engine = SignalEngine()
 
 
-def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
-    idx = df.with_row_index().with_columns((pl.col("index") // 3).alias("_g"))
-    return idx.group_by("_g", maintain_order=True).agg([
-        pl.col("timestamp").first(), pl.col("open").first(),
-        pl.col("high").max(), pl.col("low").min(),
-        pl.col("close").last(), pl.col("volume").sum(),
-    ]).drop("_g").sort("timestamp")
-
-
 async def fetch_backtest_data(symbol: str, bar: str, days: int,
                               before: Optional[str] = None) -> pl.DataFrame:
     """Fetch paginated historical data from /backtest-data endpoint.
@@ -151,8 +142,8 @@ def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float)
     signal_type = signal.get("signal_type", "NEUTRAL")
     in_kz = signal.get("in_kill_zone", False)
 
-    # Same filters as live system: score≥70 + kill zone + HTF-aligned
-    if score < 70 or not in_kz or signal_type == "NEUTRAL":
+    # Same filters as live system: score≥80 + kill zone + HTF-aligned (all 5m entries)
+    if score < 80 or not in_kz or signal_type == "NEUTRAL":
         return None
     if htf_bias != "neutral" and not signal.get("htf_aligned", True):
         return None
@@ -191,6 +182,10 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts):
     demo._daily_pnl += profit
     if demo.balance > demo._peak_balance:
         demo._peak_balance = demo.balance
+
+    # Record stop loss for cooldown tracking (matches live _check_position behavior)
+    if exit_reason == "STOP_LOSS":
+        demo._last_sl[pos.symbol] = {"time": current_ts, "side": pos.side}
 
     trade = ClosedTrade(
         symbol=pos.symbol, signal_type=pos.signal_type, side=pos.side,
@@ -241,8 +236,6 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     else:
         logger.info(f"  Initial HTF bias: neutral ({len(df_1h)} 1h candles)")
 
-    # 3. Pre-resample to 15m
-    df_15m_full = _resample_5m_to_15m(df_5m_full)
     rows = df_5m_full.to_dicts()
     total_candles = len(rows)
 
@@ -250,11 +243,16 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
+        sl_multiplier=2.0 if "ETH" in symbol.upper() else 1.0,
+        reentry_cooldown_minutes=60,
     )
 
     signals_gen = 0
     signals_kept = 0
     bias_changes = 0
+
+    # 5m buffer limit matching live system (BINANCE_BUFFER_LIMITS in api/main.py)
+    MAX_5M_BUFFER = 288  # live system: 288 candles in 5m buffer
 
     # 5. Process in chunks with periodic HTF bias recomputation
     HTF_REFRESH_INTERVAL = 288  # ~1 day in 5m candles
@@ -284,39 +282,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
             current_ts = current["timestamp"]
             candle_idx = i + j
 
-            # Build buffers up to current candle
-            buf_5m = df_5m_full.slice(0, candle_idx + 1)
-            buf_15m = df_15m_full.filter(pl.col("timestamp") <= current_ts)
-
-            # Run ICT on 5m
-            sig_5m = run_ict_on_buffer(buf_5m, htf_bias, current_price)
-
-            # Run ICT on 15m
-            sig_15m = None
-            if len(buf_15m) >= 15:
-                sig_15m = run_ict_on_buffer(buf_15m, htf_bias, current_price)
-
-            # Collect qualifying signals
-            candle_signals = []
-            for sig in [sig_5m, sig_15m]:
-                if sig is not None:
-                    sig["symbol"] = symbol
-                    sig["timestamp"] = current_ts
-                    candle_signals.append(sig)
-
-            if candle_signals:
-                signals_gen += len(candle_signals)
-
-            # HTF alignment filter
-            if htf_bias != "neutral":
-                aligned = [s for s in candle_signals if s.get("htf_aligned", True)]
-            else:
-                aligned = []
-
-            if aligned:
-                signals_kept += len(aligned)
-
-            # Step 1: Check open positions against candle H/L
+            # Step 1: Check open positions against candle H/L (every 5m candle)
             for sym in list(demo.open_positions.keys()):
                 if sym != symbol:
                     continue
@@ -325,7 +291,26 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 if reason is not None:
                     close_position(demo, pos, price, reason, current_ts)
 
-            # Step 2: Feed new signals to DemoAccount (pass candle timestamp for daily P&L reset)
+            # Step 2: Run ICT on 5m buffer every candle for real-time entries
+            aligned = []
+            buf_start = max(0, candle_idx - MAX_5M_BUFFER) if candle_idx > MAX_5M_BUFFER else 0
+            buf = df_5m_full.slice(buf_start, candle_idx - buf_start)
+            if len(buf) >= 15:
+                sig = run_ict_on_buffer(buf, htf_bias, current_price)
+                if sig is not None:
+                    sig["symbol"] = symbol
+                    sig["timestamp"] = current_ts
+                    signals_gen += 1
+
+                    # HTF alignment filter
+                    if htf_bias != "neutral":
+                        if sig.get("htf_aligned", True):
+                            aligned = [sig]
+                            signals_kept += 1
+                    else:
+                        aligned = []
+
+            # Step 3: Feed signals to DemoAccount
             demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
 
         i = chunk_end
@@ -414,17 +399,18 @@ def print_combined_summary(all_results: List[Dict]):
     for r in all_results:
         sym = "btc" if r["symbol"] == "BTCUSDT" else "eth"
         g = grand_total[sym]
-        g["trades"] += r["total_trades"]
-        g["wins"] += r["wins"]
-        g["losses"] += r["losses"]
-        g["profit"] += r["total_profit"]
-        g["signals_gen"] += r["signals_gen"]
-        g["signals_kept"] += r["signals_kept"]
-        if r["total_trades"] > 0:
-            g["dd_sum"] += r["max_drawdown"]
+        trades = r.get("total_trades", 0)
+        g["trades"] += trades
+        g["wins"] += r.get("wins", 0)
+        g["losses"] += r.get("losses", 0)
+        g["profit"] += r.get("total_profit", 0.0)
+        g["signals_gen"] += r.get("signals_gen", 0)
+        g["signals_kept"] += r.get("signals_kept", 0)
+        if trades > 0:
+            g["dd_sum"] += r.get("max_drawdown", 0.0)
             g["dd_count"] += 1
-            g["rr_sum"] += r["avg_rr"] * r["total_trades"]
-            g["rr_count"] += r["total_trades"]
+            g["rr_sum"] += r.get("avg_rr", 0.0) * trades
+            g["rr_count"] += trades
 
     for label, g in [("BTCUSDT", grand_total["btc"]), ("ETHUSDT", grand_total["eth"])]:
         if g["trades"] == 0:
@@ -466,6 +452,8 @@ async def main():
         description="12-Month Rolling Backtest of ICT Strategy")
     parser.add_argument("--months", type=int, default=12,
                         help="Number of months to backtest (1-12, default 12)")
+    parser.add_argument("--offset", type=int, default=None,
+                        help="Run a single month at this offset (0=newest, 11=oldest). Overrides --months.")
     parser.add_argument("--parallel", action="store_true",
                         help="Run both symbols per month in parallel")
     args = parser.parse_args()
@@ -474,27 +462,36 @@ async def main():
     logger.add(sys.stderr, level="INFO",
                format="<level>{level: <8}</level> | {message}")
 
-    num_months = min(max(args.months, 1), 12)
-
-    print("\n" + "=" * 70)
-    print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
-    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥70 + KZ + HTF-aligned")
-    print(f"  Symbols: {', '.join(SYMBOLS)}")
-    print("=" * 70 + "\n")
-
     today = datetime.utcnow().date()
     all_raw_results = []
 
-    # Go from oldest month to newest (so HTF bias builds naturally)
-    for month_offset in reversed(range(num_months)):
+    if args.offset is not None:
+        # Single-month mode
+        offsets = [max(0, min(args.offset, 11))]
+    else:
+        num_months = min(max(args.months, 1), 12)
+        offsets = list(reversed(range(num_months)))
+
+    print("\n" + "=" * 70)
+    if args.offset is not None:
+        end_date = today - timedelta(days=args.offset * 30)
+        print(f"  📊 SINGLE MONTH BACKTEST — ending {end_date.strftime('%b %d, %Y')}")
+    else:
+        print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
+    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥80 + KZ + HTF-aligned | 5m entries | ETH:2.0× BTC:1.5× ATR SL")
+    print(f"  Symbols: {', '.join(SYMBOLS)}")
+    print("=" * 70 + "\n")
+
+    for month_idx, month_offset in enumerate(offsets):
         end_date = today - timedelta(days=month_offset * 30)
         before_str = end_date.isoformat()
         month_label = end_date.strftime("%Y-%m")
 
-        print(f"\n{'━'*70}")
-        print(f"  Month {num_months - month_offset}/{num_months} — "
-              f"ending {end_date.strftime('%b %d, %Y')}")
-        print(f"{'━'*70}")
+        if args.offset is None:
+            print(f"\n{'━'*70}")
+            print(f"  Month {month_idx + 1}/{len(offsets)} — "
+                  f"ending {end_date.strftime('%b %d, %Y')}")
+            print(f"{'━'*70}")
 
         if args.parallel:
             tasks = [backtest_symbol(sym, before=before_str) for sym in SYMBOLS]
@@ -508,40 +505,66 @@ async def main():
 
         r1, r2 = results[0], results[1]
 
-        # Use actual data ranges from results
         dr1 = r1.get("data_range", "") if r1.get("total_trades", 0) > 0 else "(no data)"
         dr2 = r2.get("data_range", "") if r2.get("total_trades", 0) > 0 else "(no data)"
         data_range = f"BTC: {dr1} | ETH: {dr2}"
 
-        print_month_result(num_months - month_offset, month_label, data_range, r1, r2)
+        print_month_result(month_idx + 1, month_label, data_range, r1, r2)
         all_raw_results.extend(results)
 
-    print_combined_summary(all_raw_results)
+        if args.offset is not None:
+            # Print single result as JSON for easy parsing
+            import json
+            summary = {
+                "month_offset": args.offset,
+                "month": month_label,
+                "end_date": before_str,
+                "results": [
+                    {
+                        "symbol": r["symbol"],
+                        "htf_bias": r.get("htf_bias", "neutral"),
+                        "trades": r["total_trades"],
+                        "wins": r["wins"],
+                        "losses": r["losses"],
+                        "win_rate_pct": round(r.get("win_rate", 0) * 100, 1),
+                        "profit": round(r.get("total_profit", 0), 2),
+                        "profit_factor": r.get("profit_factor", 0),
+                        "max_dd_pct": round(r.get("max_drawdown", 0) * 100, 1),
+                        "avg_rr": r.get("avg_rr", 0),
+                        "data_range": r.get("data_range", ""),
+                    }
+                    for r in results
+                ],
+                "combined_profit": round(sum(r.get("total_profit", 0) for r in results), 2),
+            }
+            print(f"\n  JSON:{json.dumps(summary)}")
 
-    # Monthly breakdown table
-    print(f"\n\n{'='*70}")
-    print(f"  MONTHLY BREAKDOWN")
-    print(f"{'='*70}")
+    if args.offset is None:
+        print_combined_summary(all_raw_results)
 
-    print(f"\n  {'Month':<10} {'Symbol':<10} {'Trades':<8} {'WR%':<8} {'P&L':<12} "
-          f"{'PF':<8} {'DD%':<8} {'RR':<8}")
-    print(f"  {'─'*8:<10} {'─'*8:<10} {'─'*6:<8} {'─'*5:<8} {'─'*10:<12} "
-          f"{'─'*6:<8} {'─'*5:<8} {'─'*5:<8}")
+        print(f"\n\n{'='*70}")
+        print(f"  MONTHLY BREAKDOWN")
+        print(f"{'='*70}")
 
-    for r in all_raw_results:
-        trades = r.get("total_trades", 0)
-        wr = r.get("win_rate", 0) * 100
-        pnl = r.get("total_profit", 0)
-        pf = r.get("profit_factor", 0)
-        dd = r.get("max_drawdown", 0) * 100
-        rr = r.get("avg_rr", 0)
-        sym = r["symbol"]
-        month = r.get("month", "?")
-        print(f"  {month:<10} {sym:<10} {trades:<8} {wr:<7.1f}% "
-              f"${pnl:<9.2f} {pf:<8.2f} {dd:<7.1f}% {rr:<8.2f}")
+        print(f"\n  {'Month':<10} {'Symbol':<10} {'Trades':<8} {'WR%':<8} {'P&L':<12} "
+              f"{'PF':<8} {'DD%':<8} {'RR':<8}")
+        print(f"  {'─'*8:<10} {'─'*8:<10} {'─'*6:<8} {'─'*5:<8} {'─'*10:<12} "
+              f"{'─'*6:<8} {'─'*5:<8} {'─'*5:<8}")
+
+        for r in all_raw_results:
+            trades = r.get("total_trades", 0)
+            wr = r.get("win_rate", 0) * 100
+            pnl = r.get("total_profit", 0)
+            pf = r.get("profit_factor", 0)
+            dd = r.get("max_drawdown", 0) * 100
+            rr = r.get("avg_rr", 0)
+            sym = r["symbol"]
+            month = r.get("month", "?")
+            print(f"  {month:<10} {sym:<10} {trades:<8} {wr:<7.1f}% "
+                  f"${pnl:<9.2f} {pf:<8.2f} {dd:<7.1f}% {rr:<8.2f}")
 
     print()
-    print(f"  Script complete. Total time: TBD (run completed)")
+    print(f"  Script complete.")
 
 
 if __name__ == "__main__":

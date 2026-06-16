@@ -55,18 +55,28 @@ class ClosedTrade:
 
 class DemoAccount:
     def __init__(self, initial_balance: float = 10_000.0, risk_per_trade_pct: float = 1.0,
-                 max_daily_loss_pct: float = 3.0, max_open_positions: int = 3):
+                 max_daily_loss_pct: float = 3.0, max_open_positions: int = 3,
+                 sl_multiplier: float = 1.5,
+                 reentry_cooldown_minutes: int = 60,
+                 fixed_sl_pct: float = 0.0,
+                 symbol_sl_multipliers: Optional[Dict[str, float]] = None):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
         self.risk_per_trade_pct = risk_per_trade_pct
         self.max_daily_loss_pct = max_daily_loss_pct
         self.max_open_positions = max_open_positions
+        self.sl_multiplier = sl_multiplier
+        self.reentry_cooldown_minutes = reentry_cooldown_minutes
+        self.fixed_sl_pct = fixed_sl_pct
+        self.symbol_sl_multipliers = symbol_sl_multipliers or {}  # per-symbol ATR multiplier overrides
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
         self._daily_pnl = 0.0
         self._last_trade_date = datetime.utcnow().date()
+        # Track last stop-loss for each symbol to prevent rapid re-entry
+        self._last_sl: Dict[str, Dict] = {}  # {symbol: {"time": datetime, "side": str}}
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -117,7 +127,8 @@ class DemoAccount:
             timestamp = signal.get("timestamp")
 
             # Only act on high-conviction signals in kill zone (match Discord criteria)
-            if score < 70 or not signal.get("in_kill_zone", False):
+            # Score ≥ 80 ensures at least 4-5 ICT confluences (bias + MSS + KZ + 1 more)
+            if score < 80 or not signal.get("in_kill_zone", False):
                 continue
 
             # Skip if already in a position for this symbol
@@ -142,6 +153,21 @@ class DemoAccount:
                 side = "SHORT"
             else:
                 continue
+
+            # Same-direction re-entry cooldown after stop loss
+            # Prevents the death spiral: SL → immediate re-entry → SL → re-entry
+            # Must be after side determination to avoid UnboundLocalError
+            if (self.reentry_cooldown_minutes > 0 and
+                symbol in self._last_sl and
+                self._last_sl[symbol]["side"] == side):
+                last_sl = self._last_sl[symbol]
+                mins_since = (now - last_sl["time"]).total_seconds() / 60
+                if mins_since < self.reentry_cooldown_minutes:
+                    logger.info(
+                        f"Cooldown: skipping {symbol} {signal_type} — "
+                        f"SL was {mins_since:.0f}m ago (need {self.reentry_cooldown_minutes}m)"
+                    )
+                    continue
 
             # Use ATR (fallback to 1% of price if unavailable)
             atr_value = atr if atr > 0 else price * 0.01
@@ -278,13 +304,32 @@ class DemoAccount:
 
     def _open_trade(self, symbol: str, signal_type: str, side: str,
                     price: float, atr_value: float, timestamp) -> Optional[OpenPosition]:
-        """Open a new position with 1% risk, 1:2 RR using ATR."""
-        if side == "LONG":
-            stop_loss = price - atr_value
-            take_profit = price + (2 * atr_value)
+        """Open a new position with 1% risk, 1:2 RR.
+
+        Two modes:
+          1. Fixed percentage (if fixed_sl_pct > 0):
+             SL = fixed_sl_pct% from entry, TP = 2 × SL distance
+             e.g. fixed_sl_pct=1.0 → SL 1% away, TP 2% away
+          2. ATR-based (default):
+             Uses per-symbol multiplier from symbol_sl_multipliers if available,
+             otherwise falls back to the default sl_multiplier.
+             SL = multiplier × ATR, TP = 2 × SL distance
+        """
+        if self.fixed_sl_pct > 0:
+            # Fixed percentage mode: SL = N% from entry, TP = 2× that
+            sl_distance = price * (self.fixed_sl_pct / 100)
         else:
-            stop_loss = price + atr_value
-            take_profit = price - (2 * atr_value)
+            # ATR-based mode: use per-symbol override if available, else default
+            effective_mult = self.symbol_sl_multipliers.get(symbol, self.sl_multiplier)
+            sl_distance = atr_value * effective_mult
+        tp_distance = sl_distance * 2  # Maintain 1:2 RR
+
+        if side == "LONG":
+            stop_loss = price - sl_distance
+            take_profit = price + tp_distance
+        else:
+            stop_loss = price + sl_distance
+            take_profit = price - tp_distance
 
         risk_per_unit = abs(price - stop_loss)
         if risk_per_unit <= 0:
@@ -354,6 +399,10 @@ class DemoAccount:
         self._daily_pnl += profit
         if self.balance > self._peak_balance:
             self._peak_balance = self.balance
+
+        # Record stop-loss for cooldown tracking (prevents immediate same-side re-entry)
+        if exit_reason == "STOP_LOSS":
+            self._last_sl[pos.symbol] = {"time": current_time or datetime.utcnow(), "side": pos.side}
 
         now = current_time if current_time is not None else datetime.utcnow()
 
