@@ -49,22 +49,15 @@ isNewYorkSession(h)=> h >= 13 and h < 22
 isLondonKillZone(h)=> h >= 7  and h < 9
 isNewYorkKillZone(h)=> h >= 13 and h < 15
 
-getActiveSessions(h) =>
-  asian  = isAsianSession(h)
-  london = isLondonSession(h)
-  ny     = isNewYorkSession(h)
-  [asian, london, ny]
-
-getSessionInfo(h) =>
-  inLKZ  = isLondonKillZone(h)
-  inNYKZ = isNewYorkKillZone(h)
-  [as, lo, ny] = getActiveSessions(h)
-  activeSessionCount = (as ? 1 : 0) + (lo ? 1 : 0) + (ny ? 1 : 0)
-  inAnyKZ = inLKZ or inNYKZ
-  scoreBonus = inAnyKZ ? 10 : activeSessionCount >= 2 ? 5 : 0
-  [inAnyKZ, scoreBonus]
-
 hourUTC = hour(time)
+inAsian  = isAsianSession(hourUTC)
+inLondon = isLondonSession(hourUTC)
+inNY     = isNewYorkSession(hourUTC)
+inLKZ    = isLondonKillZone(hourUTC)
+inNYKZ   = isNewYorkKillZone(hourUTC)
+inKillZone   = inLKZ or inNYKZ
+activeSessionCount = (inAsian ? 1 : 0) + (inLondon ? 1 : 0) + (inNY ? 1 : 0)
+sessionBonus = inKillZone ? 10 : activeSessionCount >= 2 ? 5 : 0
 
 // ─── Technical Indicators ─────────────────────────────────────────────────
 
@@ -193,7 +186,6 @@ if inOTE
     bearishScore += wtOTE / 2
 
 // 8. Session / Kill Zone
-[inKillZone, sessionBonus] = getSessionInfo(hourUTC)
 if htfBias == "bullish"
   bullishScore += sessionBonus
 else if htfBias == "bearish"
@@ -233,10 +225,7 @@ entryConditionShort = isSellSignal and kzFilter and htfFilter
 
 // ─── Position Sizing ──────────────────────────────────────────────────────
 
-calcQty() =>
-  riskAmt = strategy.equity * riskPerTradePct / 100.0
-  stopDist = atrVal * slMultiplier
-  stopDist > 0 ? riskAmt / stopDist : 0
+calcQty() => strategy.equity * riskPerTradePct / 100.0 / (atrVal * slMultiplier)
 
 // ─── Trade Execution ──────────────────────────────────────────────────────
 
@@ -294,15 +283,13 @@ bgcolor(showSignals and inKillZone ? color.new(#8b5cf6, 90) : na, title="Kill Zo
 
 // ─── Score Table ──────────────────────────────────────────────────────────
 
-// Table row helper (defined at top level as required by Pine Script)
-rowHelper(tbl, y, lbl, pts, active, activeClr) =>
+// Table row helper
+rowCell(tbl, y, lbl, pts, active, activeClr) =>
   c = active ? activeClr : color.gray
   k = active ? "+" + str.tostring(pts) : "0"
-  table.cell(tbl, 0, y, lbl, text_color=c, text_size=size.tiny,
-    text_halign=text.align_left)
-  table.cell(tbl, 1, y, k, text_color=c, text_size=size.tiny,
-    text_halign=text.align_right)
-
+  table.cell(tbl, 0, y, lbl, text_color=c, text_size=size.tiny, text_halign=text.align_left)
+  table.cell(tbl, 1, y, k, text_color=c, text_size=size.tiny, text_halign=text.align_right)
+  
 var table tbl = table.new(position.top_right, 2, 15,
   bgcolor=color.new(#0f172a, 85), border_width=1,
   border_color=color.new(#334155, 70))
@@ -323,15 +310,15 @@ if showScoreTable and barstate.islast
   oteActive  = inOTE
   kzActive   = inKillZone
 
-  rowHelper(tbl, 1,  "Bias",     wtBias,     biasActive, color.green)
-  rowHelper(tbl, 2,  "MSS",      wtMSS,      mssActive,  color.cyan)
-  rowHelper(tbl, 3,  "Sweep",    wtSweep,    swpActive,  color.orange)
-  rowHelper(tbl, 4,  "FVG",      wtFVG,      fvgActive,  color.purple)
-  rowHelper(tbl, 5,  "OB",       wtOB,       obActive,   color.red)
-  rowHelper(tbl, 6,  "DiscZone", wtDiscount, discActive,
+  rowCell(tbl, 1,  "Bias",     wtBias,     biasActive, color.green)
+  rowCell(tbl, 2,  "MSS",      wtMSS,      mssActive,  color.cyan)
+  rowCell(tbl, 3,  "Sweep",    wtSweep,    swpActive,  color.orange)
+  rowCell(tbl, 4,  "FVG",      wtFVG,      fvgActive,  color.purple)
+  rowCell(tbl, 5,  "OB",       wtOB,       obActive,   color.red)
+  rowCell(tbl, 6,  "DiscZone", wtDiscount, discActive,
     htfBias == "bullish" ? color.green : color.red)
-  rowHelper(tbl, 7,  "OTE",      wtOTE,      oteActive,  color.yellow)
-  rowHelper(tbl, 8,  "Session",  wtSession,  kzActive,   color.green)
+  rowCell(tbl, 7,  "OTE",      wtOTE,      oteActive,  color.yellow)
+  rowCell(tbl, 8,  "Session",  wtSession,  kzActive,   color.green)
 
   // Net score
   netC = netScore >= 30 ? color.green :
