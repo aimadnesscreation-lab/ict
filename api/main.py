@@ -67,8 +67,9 @@ _demo_account = DemoAccount(
     max_daily_loss_pct=risk_manager.max_daily_loss_pct,
     max_open_positions=risk_manager.max_open_positions,
     sl_multiplier=1.5,
-    reentry_cooldown_minutes=60,
+    reentry_cooldown_minutes=0,
     symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
+    symbol_min_scores={"BTCUSDT": 70, "ETHUSDT": 70},
 )
 
 # ── Binance crypto data ──────────────────────────────────────────────
