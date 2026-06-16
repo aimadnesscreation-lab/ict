@@ -153,7 +153,7 @@ async def debug_backtest_symbol(symbol: str, before: Optional[str] = None) -> Di
     rows = df_5m.to_dicts()
     total = len(rows)
 
-    sl_mult = 2.0 if "ETH" in symbol.upper() else 1.0
+    sl_mult = 0.5  # 0.5× ATR for all symbols
     demo = DemoAccount(initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
                        max_daily_loss_pct=3.0, max_open_positions=3,
                        sl_multiplier=sl_mult,

@@ -273,7 +273,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
-        sl_multiplier=0.5 if is_btc else 2.0,
+        sl_multiplier=0.5,
         reentry_cooldown_minutes=0 if is_btc else 60,
         symbol_min_scores={symbol.upper(): symbol_min_score},
     )
@@ -513,7 +513,7 @@ async def main():
     else:
         print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
     print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | 5m entries")
-    print(f"  BTC: Config A (score≥70, 1.0× SL, no cooldown) | ETH: Config F (score≥80, 2.0× SL, 60min cd)")
+    print(f"  BTC: 0.5× SL, 0min cooldown | ETH: 0.5× SL, 60min cd")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
 
