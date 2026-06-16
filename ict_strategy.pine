@@ -1,229 +1,206 @@
 //@version=5
-strategy(title="ICT Dual-Score Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, currency=currency.USD, commission_type=strategy.commission.percent, commission_value=0.04, pyramiding=1)
+strategy("ICT Dual-Score Strategy", overlay=true, initial_capital=10000,
+  default_qty_type=strategy.percent_of_equity, default_qty_value=100,
+  commission_type=strategy.commission.percent, commission_value=0.04,
+  pyramiding=1, currency=currency.USD)
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  📐 USER INPUTS — All configurable from TradingView settings panel
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── User Inputs ──────────────────────────────────────────────────────────
 
-// -- Signal Weights (mirrors signal_engine/engine.py) --
-wtBias              = input.int(20, "HTF Bias Weight",     group="Signal Weights", minval=0, maxval=40)
-wtMSS               = input.int(20, "MSS Weight",          group="Signal Weights", minval=0, maxval=40)
-wtSweep             = input.int(20, "Liquidity Sweep Weight", group="Signal Weights", minval=0, maxval=40)
-wtFVG               = input.int(15, "FVG Weight",          group="Signal Weights", minval=0, maxval=30)
-wtOB                = input.int(15, "Order Block Weight",   group="Signal Weights", minval=0, maxval=30)
-wtDiscount          = input.int(10, "Discount Zone Weight", group="Signal Weights", minval=0, maxval=20)
-wtOTE               = input.int(10, "OTE Zone Weight",     group="Signal Weights", minval=0, maxval=20)
-wtSession           = input.int(10, "Session/Kill Zone Weight", group="Signal Weights", minval=0, maxval=20)
+// Signal Weights
+wtBias    = input.int(20, "HTF Bias Weight",     group="Weights", minval=0, maxval=40)
+wtMSS     = input.int(20, "MSS Weight",          group="Weights", minval=0, maxval=40)
+wtSweep   = input.int(20, "Liquidity Sweep Weight", group="Weights", minval=0, maxval=40)
+wtFVG     = input.int(15, "FVG Weight",          group="Weights", minval=0, maxval=30)
+wtOB      = input.int(15, "Order Block Weight",   group="Weights", minval=0, maxval=30)
+wtDiscount= input.int(10, "Discount Zone Weight", group="Weights", minval=0, maxval=20)
+wtOTE     = input.int(10, "OTE Zone Weight",     group="Weights", minval=0, maxval=20)
+wtSession = input.int(10, "Session/Kill Zone Weight", group="Weights", minval=0, maxval=20)
 
-// -- Risk Management --
-slMultiplier        = input.float(1.5, "ATR x SL Multiplier", group="Risk Management", step=0.1)
-rrTarget            = input.float(2.0, "Risk:Reward Target",   group="Risk Management", step=0.1, minval=0.5)
-riskPerTradePct     = input.float(1.0, "Risk Per Trade (%)",   group="Risk Management", step=0.1)
+// Risk Management
+slMultiplier    = input.float(1.5, "ATR x SL Multiplier", group="Risk", step=0.1)
+rrTarget        = input.float(2.0, "Risk:Reward Target",   group="Risk", step=0.1, minval=0.5)
+riskPerTradePct = input.float(1.0, "Risk Per Trade (%)",   group="Risk", step=0.1)
 
-// -- Technical Parameters --
-pivotLookback       = input.int(3,  "Pivot Lookback (L/R)",  group="Technical", minval=1, maxval=10)
-fvgLookback         = input.int(5,  "FVG / OB Lookback Bars", group="Technical", minval=1, maxval=20)
-atrLength           = input.int(14, "ATR Period",             group="Technical", minval=5, maxval=50)
-atrThreshold        = input.float(0.10, "ATR Threshold (EQH/EQL)", group="Technical", step=0.01, minval=0.01)
-obAtrMult           = input.float(2.0, "OB Impulse ATR Mult", group="Technical", step=0.1)
-emaFast             = input.int(12,  "EMA Fast",              group="Technical", minval=1)
-emaSlow             = input.int(26,  "EMA Slow",              group="Technical", minval=1)
-emaThreshold        = input.float(0.5, "EMA Threshold (%)",   group="Technical", step=0.1)
+// Technical Parameters
+pivotLookback  = input.int(3,  "Pivot Lookback",   group="Tech", minval=1, maxval=10)
+fvgLookback    = input.int(5,  "FVG Lookback Bars", group="Tech", minval=1, maxval=20)
+atrLength      = input.int(14, "ATR Period",        group="Tech", minval=5, maxval=50)
+obAtrMult      = input.float(2.0, "OB Impulse Mult", group="Tech", step=0.1)
+emaFast        = input.int(12, "EMA Fast",   group="Tech", minval=1)
+emaSlow        = input.int(26, "EMA Slow",   group="Tech", minval=1)
+emaThreshold   = input.float(0.5, "EMA Threshold %", group="Tech", step=0.1)
 
-// -- Session Filters --
-useKillZoneOnly     = input.bool(true, "Only Trade in Kill Zones", group="Session Filters")
-useAsianSession     = input.bool(true, "Asian Session Enabled",    group="Session Filters")
-useLondonSession    = input.bool(true, "London Session Enabled",   group="Session Filters")
-useNewYorkSession   = input.bool(true, "New York Session Enabled", group="Session Filters")
+// Session Filters
+useKillZoneOnly   = input.bool(true, "Only Trade in Kill Zones", group="Sessions")
 
-// -- Display --
-showFVG             = input.bool(true,  "Show FVG Zones",       group="Display")
-showOB              = input.bool(true,  "Show Order Blocks",    group="Display")
-showSwingPoints     = input.bool(true,  "Show Swing Points",    group="Display")
-showSignals         = input.bool(true,  "Show Signal Labels",   group="Display")
-showScoreTable      = input.bool(true,  "Show Score Table",     group="Display")
-minScoreToTrade     = input.int(70,     "Min Score to Trade",   group="Display", minval=0, maxval=100)
+// Display
+showFVG         = input.bool(true,  "Show FVG Zones",    group="Display")
+showOB          = input.bool(true,  "Show Order Blocks", group="Display")
+showSwingPoints = input.bool(true,  "Show Swing Points", group="Display")
+showSignals     = input.bool(true,  "Show Signal Labels", group="Display")
+showScoreTable  = input.bool(true,  "Show Score Table",  group="Display")
+minScoreToTrade = input.int(70,     "Min Score to Trade", group="Display", minval=0, maxval=100)
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  🕐 SESSION & KILL ZONE DETECTION (mirrors ict_engine/sessions.py)
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Session & Kill Zone Detection ────────────────────────────────────────
 
-isAsianSession(h) => h >= 0  and h < 9
+isAsianSession(h)  => h >= 0  and h < 9
 isLondonSession(h) => h >= 8 and h < 17
-isNewYorkSession(h) => h >= 13 and h < 22
-
-isLondonKillZone(h)    => h >= 7  and h < 9
-isNewYorkKillZone(h)   => h >= 13 and h < 15
-isLondonCloseZone(h)   => h >= 17 and h < 18
+isNewYorkSession(h)=> h >= 13 and h < 22
+isLondonKillZone(h)=> h >= 7  and h < 9
+isNewYorkKillZone(h)=> h >= 13 and h < 15
 
 getActiveSessions(h) =>
-    asian  = isAsianSession(h)
-    london = isLondonSession(h)
-    ny     = isNewYorkSession(h)
-    [asian, london, ny]
+  asian  = isAsianSession(h)
+  london = isLondonSession(h)
+  ny     = isNewYorkSession(h)
+  [asian, london, ny]
 
 getSessionInfo(h) =>
-    inLKZ  = isLondonKillZone(h)
-    inNYKZ = isNewYorkKillZone(h)
-    [as, lo, ny] = getActiveSessions(h)
-    activeSessionCount = (as ? 1 : 0) + (lo ? 1 : 0) + (ny ? 1 : 0)
-    inAnyKZ = inLKZ or inNYKZ
-    scoreBonus = inAnyKZ ? 10 : activeSessionCount >= 2 ? 5 : 0
-    [inAnyKZ, scoreBonus]
+  inLKZ  = isLondonKillZone(h)
+  inNYKZ = isNewYorkKillZone(h)
+  [as, lo, ny] = getActiveSessions(h)
+  activeSessionCount = (as ? 1 : 0) + (lo ? 1 : 0) + (ny ? 1 : 0)
+  inAnyKZ = inLKZ or inNYKZ
+  scoreBonus = inAnyKZ ? 10 : activeSessionCount >= 2 ? 5 : 0
+  [inAnyKZ, scoreBonus]
 
 hourUTC = hour(time)
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  📈 TECHNICAL INDICATORS
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Technical Indicators ─────────────────────────────────────────────────
 
 atrVal = ta.atr(atrLength)
 emaFastVal = ta.ema(close, emaFast)
 emaSlowVal = ta.ema(close, emaSlow)
 
-// HTF Bias via 1h (non-repainting: uses prior confirmed bar)
-htfClose = request.security(syminfo.tickerid, "60", close[1], lookahead=barmerge.lookahead_on)
+// HTF Bias (1h, non-repainting)
+htfClose = request.security(syminfo.tickerid, "60", close[1],
+  lookahead=barmerge.lookahead_on)
 htfEmaFast = ta.ema(htfClose, emaFast)
 htfEmaSlow = ta.ema(htfClose, emaSlow)
 htfDiffPct = ((htfEmaFast - htfEmaSlow) / htfClose) * 100
-htfBias = htfDiffPct >  emaThreshold ? "bullish" : htfDiffPct < -emaThreshold ? "bearish" : "neutral"
+htfBias = htfDiffPct >  emaThreshold ? "bullish" :
+  htfDiffPct < -emaThreshold ? "bearish" : "neutral"
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  🔄 ICT PATTERN DETECTION
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── ICT Pattern Detection ────────────────────────────────────────────────
 
-// ── 1. Swings ──
+// Swings
 swingHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
 swingLow  = ta.pivotlow(low, pivotLookback, pivotLookback)
 
 var float lastSwingHigh = na
 var float lastSwingLow  = na
 if not na(swingHigh)
-    lastSwingHigh := swingHigh
+  lastSwingHigh := swingHigh
 if not na(swingLow)
-    lastSwingLow  := swingLow
+  lastSwingLow  := swingLow
 
-// ── 2. MSS ──
+// MSS
 isBullishMSS = not na(lastSwingHigh) and close > lastSwingHigh[2]
 isBearishMSS = not na(lastSwingLow)  and close < lastSwingLow[2]
 mssType = isBullishMSS ? "BULLISH_MSS" : isBearishMSS ? "BEARISH_MSS" : na
 
-// ── 3. FVG ──
+// FVG
 bullishFVG = high[2] < low
 bearishFVG = low[2]  > high
-
-// Check if FVG occurred within lookback window
 fvgDetectedBullish = ta.cum(bullishFVG) > ta.cum(bullishFVG)[fvgLookback]
 fvgDetectedBearish = ta.cum(bearishFVG) > ta.cum(bearishFVG)[fvgLookback]
 
-// ── 4. Order Blocks ──
+// Order Blocks
 futureMoveSize = abs(close[3] - close)
 impulseMove = futureMoveSize > (atrVal * obAtrMult)
-
 isBullishImpulse = (close[3] > close) and impulseMove
-isBearishImpulse  = (close[3] < close) and impulseMove
-
+isBearishImpulse = (close[3] < close) and impulseMove
 isBearishCandle = close[1] < open[1]
 isBullishCandle = close[1] > open[1]
-
 bullishOB = isBullishImpulse and isBearishCandle[1]
-bearishOB  = isBearishImpulse  and isBullishCandle[1]
-
+bearishOB = isBearishImpulse  and isBullishCandle[1]
 obDetectedBullish = ta.cum(bullishOB) > ta.cum(bullishOB)[fvgLookback]
 obDetectedBearish = ta.cum(bearishOB) > ta.cum(bearishOB)[fvgLookback]
 
-// ── 5. Liquidity Sweeps ──
+// Liquidity Sweeps
 brokeBelowSwingLow  = not na(lastSwingLow)  and low   < lastSwingLow[1]
 reclaimedSwingLow   = not na(lastSwingLow)  and close > lastSwingLow[1]
 bullishSweep = brokeBelowSwingLow and reclaimedSwingLow
-
 brokeAboveSwingHigh = not na(lastSwingHigh) and high  > lastSwingHigh[1]
 reclaimedSwingHigh  = not na(lastSwingHigh) and close < lastSwingHigh[1]
 bearishSweep = brokeAboveSwingHigh and reclaimedSwingHigh
-
 sweepType = bullishSweep ? "BULLISH" : bearishSweep ? "BEARISH" : na
 
-// ── 6. Premium / Discount + OTE ──
+// Premium/Discount + OTE
 dealingHigh = na(lastSwingHigh) ? ta.highest(high, 20) : lastSwingHigh
 dealingLow  = na(lastSwingLow)  ? ta.lowest(low, 20)   : lastSwingLow
 dealingRange = dealingHigh - dealingLow
-equilibrium  = (dealingHigh + dealingLow) / 2
-
+equilibriumVal  = (dealingHigh + dealingLow) / 2
 ote62 = dealingLow + dealingRange * 0.62
 ote79 = dealingLow + dealingRange * 0.79
+inDiscount = close < equilibriumVal
+inOTE = close >= ote62 and close <= ote79
 
-inDiscount = close < equilibrium
-inOTE      = close >= ote62 and close <= ote79
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  🧮 DUAL-SCORE SIGNAL ENGINE
-// ═══════════════════════════════════════════════════════════════════════════
-
-biasToUse = htfBias
+// ─── Dual-Score Signal Engine ─────────────────────────────────────────────
 
 bullishScore = 0
 bearishScore = 0
 
 // 1. Bias / HTF Alignment
-if biasToUse == "bullish"
-    bullishScore += wtBias
-else if biasToUse == "bearish"
-    bearishScore += wtBias
+if htfBias == "bullish"
+  bullishScore += wtBias
+else if htfBias == "bearish"
+  bearishScore += wtBias
 
 // 2. MSS
 if mssType == "BULLISH_MSS"
-    bullishScore += wtMSS
+  bullishScore += wtMSS
 else if mssType == "BEARISH_MSS"
-    bearishScore += wtMSS
+  bearishScore += wtMSS
 
 // 3. Liquidity Sweep
 if sweepType == "BULLISH"
-    bullishScore += wtSweep
+  bullishScore += wtSweep
 else if sweepType == "BEARISH"
-    bearishScore += wtSweep
+  bearishScore += wtSweep
 
 // 4. FVG
 if fvgDetectedBullish
-    bullishScore += wtFVG
+  bullishScore += wtFVG
 if fvgDetectedBearish
-    bearishScore += wtFVG
+  bearishScore += wtFVG
 
 // 5. Order Block
 if obDetectedBullish
-    bullishScore += wtOB
+  bullishScore += wtOB
 if obDetectedBearish
-    bearishScore += wtOB
+  bearishScore += wtOB
 
 // 6. Premium / Discount Zone
-if biasToUse == "bullish" and inDiscount
-    bullishScore += wtDiscount
-else if biasToUse == "bearish" and not inDiscount
-    bearishScore += wtDiscount
+if htfBias == "bullish" and inDiscount
+  bullishScore += wtDiscount
+else if htfBias == "bearish" and not inDiscount
+  bearishScore += wtDiscount
 else
-    if inDiscount
-        bullishScore += wtDiscount / 2
-    else
-        bearishScore += wtDiscount / 2
+  if inDiscount
+    bullishScore += wtDiscount / 2
+  else
+    bearishScore += wtDiscount / 2
 
 // 7. OTE
 if inOTE
-    if biasToUse == "bullish"
-        bullishScore += wtOTE
-    else if biasToUse == "bearish"
-        bearishScore += wtOTE
-    else
-        bullishScore += wtOTE / 2
-        bearishScore += wtOTE / 2
+  if htfBias == "bullish"
+    bullishScore += wtOTE
+  else if htfBias == "bearish"
+    bearishScore += wtOTE
+  else
+    bullishScore += wtOTE / 2
+    bearishScore += wtOTE / 2
 
 // 8. Session / Kill Zone
 [inKillZone, sessionBonus] = getSessionInfo(hourUTC)
-if biasToUse == "bullish"
-    bullishScore += sessionBonus
-else if biasToUse == "bearish"
-    bearishScore += sessionBonus
+if htfBias == "bullish"
+  bullishScore += sessionBonus
+else if htfBias == "bearish"
+  bearishScore += sessionBonus
 else
-    bullishScore += sessionBonus / 2
-    bearishScore += sessionBonus / 2
+  bullishScore += sessionBonus / 2
+  bearishScore += sessionBonus / 2
 
 // Cap scores
 bullishScore := math.min(bullishScore, 100)
@@ -231,62 +208,61 @@ bearishScore := math.min(bearishScore, 100)
 
 netScore = bullishScore - bearishScore
 confidenceStrength = math.max(bullishScore, bearishScore)
-
-// Signal type from net score
-signalType = netScore >= 60 ? "STRONG_BUY" : netScore >= 30 ? "BUY" : netScore > -30 ? "NEUTRAL" : netScore > -60 ? "SELL" : "STRONG_SELL"
+signalType = netScore >= 60 ? "STRONG_BUY" :
+  netScore >= 30 ? "BUY" :
+  netScore > -30 ? "NEUTRAL" :
+  netScore > -60 ? "SELL" : "STRONG_SELL"
 
 // HTF alignment check
 htfAligned = true
 if htfBias != "neutral"
-    if htfBias == "bullish" and (signalType == "SELL" or signalType == "STRONG_SELL")
-        htfAligned := false
-    else if htfBias == "bearish" and (signalType == "BUY" or signalType == "STRONG_BUY")
-        htfAligned := false
+  if htfBias == "bullish" and (signalType == "SELL" or signalType == "STRONG_SELL")
+    htfAligned := false
+  else if htfBias == "bearish" and (signalType == "BUY" or signalType == "STRONG_BUY")
+    htfAligned := false
 
 // Entry conditions
-isBuySignal  = (signalType == "STRONG_BUY" or signalType == "BUY")   and confidenceStrength >= minScoreToTrade
-isSellSignal = (signalType == "STRONG_SELL" or signalType == "SELL") and confidenceStrength >= minScoreToTrade
+isBuySignal  = (signalType == "STRONG_BUY" or signalType == "BUY")
+  and confidenceStrength >= minScoreToTrade
+isSellSignal = (signalType == "STRONG_SELL" or signalType == "SELL")
+  and confidenceStrength >= minScoreToTrade
 kzFilter     = useKillZoneOnly ? inKillZone : true
 htfFilter    = htfAligned or (htfBias == "neutral")
-
 entryConditionLong  = isBuySignal  and kzFilter and htfFilter
 entryConditionShort = isSellSignal and kzFilter and htfFilter
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  💰 TRADE EXECUTION
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Position Sizing ──────────────────────────────────────────────────────
 
-// Position sizing: risk fixed % of equity
 calcQty() =>
-    riskAmt = strategy.equity * riskPerTradePct / 100.0
-    stopDist = atrVal * slMultiplier
-    stopDist > 0 ? riskAmt / stopDist : 0
+  riskAmt = strategy.equity * riskPerTradePct / 100.0
+  stopDist = atrVal * slMultiplier
+  stopDist > 0 ? riskAmt / stopDist : 0
+
+// ─── Trade Execution ──────────────────────────────────────────────────────
 
 if barstate.isconfirmed
-    // ── Long ──
-    if entryConditionLong and strategy.position_size <= 0
-        stopDist = atrVal * slMultiplier
-        qty = calcQty()
-        strategy.entry("Long", strategy.long, qty=qty)
-        strategy.exit("Long Exit", "Long",
-          stop=close - stopDist, limit=close + (stopDist * rrTarget))
+  if entryConditionLong and strategy.position_size <= 0
+    stopDist2 = atrVal * slMultiplier
+    qty = calcQty()
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Exit", "Long",
+      stop=close - stopDist2, limit=close + (stopDist2 * rrTarget))
 
-    // ── Short ──
-    if entryConditionShort and strategy.position_size >= 0
-        stopDist = atrVal * slMultiplier
-        qty = calcQty()
-        strategy.entry("Short", strategy.short, qty=qty)
-        strategy.exit("Short Exit", "Short",
-          stop=close + stopDist, limit=close - (stopDist * rrTarget))
+  if entryConditionShort and strategy.position_size >= 0
+    stopDist2 = atrVal * slMultiplier
+    qty = calcQty()
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Exit", "Short",
+      stop=close + stopDist2, limit=close - (stopDist2 * rrTarget))
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  🎨 VISUAL PLOTTING
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Visual Plotting ──────────────────────────────────────────────────────
 
-plotshape(showSwingPoints ? swingHigh : na, "Swing High", style=shape.triangledown,
-  location=location.abovebar, color=color.new(#f43f5e, 40), size=size.tiny)
-plotshape(showSwingPoints ? swingLow  : na, "Swing Low",  style=shape.triangleup,
-  location=location.belowbar, color=color.new(#22c55e, 40), size=size.tiny)
+plotshape(showSwingPoints ? swingHigh : na, "Swing High",
+  style=shape.triangledown, location=location.abovebar,
+  color=color.new(#f43f5e, 40), size=size.tiny)
+plotshape(showSwingPoints ? swingLow  : na, "Swing Low",
+  style=shape.triangleup, location=location.belowbar,
+  color=color.new(#22c55e, 40), size=size.tiny)
 
 plot(emaFastVal, "EMA Fast", color=color.new(#06b6d4, 60), linewidth=1)
 plot(emaSlowVal, "EMA Slow", color=color.new(#f59e0b, 60), linewidth=1)
@@ -295,7 +271,8 @@ oteP1 = plot(ote62, "OTE 62%", display=display.none)
 oteP2 = plot(ote79, "OTE 79%", display=display.none)
 fill(oteP1, oteP2, color=color.new(#8b5cf6, 85), title="OTE Zone")
 
-plot(equilibrium, "Equilibrium", color=color.new(#64748b, 50), linewidth=1, style=plot.style_dashed)
+plot(equilibriumVal, "Equilibrium",
+  color=color.new(#64748b, 50), linewidth=1, style=plot.style_dashed)
 
 bgcolor(showFVG and bullishFVG ? color.new(#22c55e, 85) : na, title="Bullish FVG")
 bgcolor(showFVG and bearishFVG  ? color.new(#f43f5e, 85) : na, title="Bearish FVG")
@@ -303,77 +280,93 @@ bgcolor(showOB  and bullishOB  ? color.new(#06b6d4, 80) : na, title="Bullish OB"
 bgcolor(showOB  and bearishOB   ? color.new(#f59e0b, 80) : na, title="Bearish OB")
 
 if showSignals and entryConditionLong
-    label.new(bar_index, low, "🟢 " + str.tostring(confidenceStrength),
-      style=label.style_label_up, color=color.new(#22c55e, 70), textcolor=color.white, size=size.small)
+  label.new(bar_index, low, "B " + str.tostring(confidenceStrength),
+    style=label.style_label_up, color=color.new(#22c55e, 70),
+    textcolor=color.white, size=size.small)
 
 if showSignals and entryConditionShort
-    label.new(bar_index, high, "🔴 " + str.tostring(confidenceStrength),
-      style=label.style_label_down, color=color.new(#f43f5e, 70), textcolor=color.white, size=size.small)
-
-// ═══════════════════════════════════════════════════════════════════════════
-//  📊 SCORE TABLE
-// ═══════════════════════════════════════════════════════════════════════════
-
-var table tbl = table.new(position.top_right, 2, 15,
-  bgcolor=color.new(#0f172a, 85), border_width=1, border_color=color.new(#334155, 70))
-
-if showScoreTable and barstate.islast
-    table.cell(tbl, 0, 0, "ICT Score Engine", text_color=color.white, text_size=size.small, text_halign=text.align_center)
-    table.cell(tbl, 1, 0, "Score", text_color=color.white, text_size=size.small)
-
-    // Row helper: (y, label, points, active, activeColor)
-    row(y, lbl, pts, act, clr) =>
-        c = act ? clr : color.gray
-        table.cell(tbl, 0, y, lbl, text_color=c, text_size=size.tiny, text_halign=text.align_left)
-        table.cell(tbl, 1, y, act ? "✅ +" + str.tostring(pts) : "⬜ 0", text_color=c, text_size=size.tiny, text_halign=text.align_right)
-
-    // Compute active colors
-    biasActive = biasToUse == "bullish" or biasToUse == "bearish"
-    mssActive  = mssType == "BULLISH_MSS" or mssType == "BEARISH_MSS"
-    swpActive  = sweepType == "BULLISH" or sweepType == "BEARISH"
-    fvgActive  = fvgDetectedBullish or fvgDetectedBearish
-    obActive   = obDetectedBullish or obDetectedBearish
-    discActive = (biasToUse == "bullish" and inDiscount) or (biasToUse == "bearish" and not inDiscount)
-    oteActive  = inOTE
-    kzActive   = inKillZone
-
-    row(1,  "Bias",     wtBias,     biasActive, color.green)
-    row(2,  "MSS",      wtMSS,      mssActive,  color.cyan)
-    row(3,  "Sweep",    wtSweep,    swpActive,  color.orange)
-    row(4,  "FVG",      wtFVG,      fvgActive,  color.purple)
-    row(5,  "OB",       wtOB,       obActive,   color.red)
-    row(6,  "DiscZone", wtDiscount, discActive, biasToUse == "bullish" ? color.green : color.red)
-    row(7,  "OTE",      wtOTE,      oteActive,  color.yellow)
-    row(8,  "Session",  wtSession,  kzActive,   color.green)
-
-    // Net score
-    netC = netScore >= 30 ? color.green : netScore <= -30 ? color.red : color.gray
-    table.cell(tbl, 0, 9,  "NET",        text_color=color.new(#64748b, 90), text_size=size.tiny)
-    table.cell(tbl, 1, 9,  str.tostring(netScore), text_color=netC, text_size=size.small, text_halign=text.align_right)
-
-    // Signal
-    sigC = signalType == "STRONG_BUY" or signalType == "BUY" ? color.green : signalType == "STRONG_SELL" or signalType == "SELL" ? color.red : color.gray
-    table.cell(tbl, 0, 10, signalType,         text_color=sigC, text_size=size.small, text_halign=text.align_center)
-    table.cell(tbl, 1, 10, "(" + str.tostring(confidenceStrength) + ")", text_color=sigC, text_size=size.tiny)
-
-    // HTF Bias
-    htfC = htfBias == "bullish" ? color.green : htfBias == "bearish" ? color.red : color.gray
-    table.cell(tbl, 0, 11, "HTF Bias",    text_color=color.new(#64748b, 90), text_size=size.tiny)
-    table.cell(tbl, 1, 11, htfBias.upper(), text_color=htfC, text_size=size.tiny, text_halign=text.align_right)
-
-    // Kill Zone
-    table.cell(tbl, 0, 12, "Kill Zone", text_color=color.new(#64748b, 90), text_size=size.tiny)
-    table.cell(tbl, 1, 12, inKillZone ? "✅ ACTIVE" : "❌", text_color=kzActive ? color.green : color.gray,
-      text_size=size.tiny, text_halign=text.align_right)
+  label.new(bar_index, high, "S " + str.tostring(confidenceStrength),
+    style=label.style_label_down, color=color.new(#f43f5e, 70),
+    textcolor=color.white, size=size.small)
 
 // Kill zone background
 bgcolor(showSignals and inKillZone ? color.new(#8b5cf6, 90) : na, title="Kill Zone")
 
-// ═══════════════════════════════════════════════════════════════════════════
-//  📝 ALERTS
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Score Table ──────────────────────────────────────────────────────────
 
-alertcondition(entryConditionLong,  "ICT Buy Signal",
-  "🟢 {{ticker}} BUY — Score: {{close}}")
+// Table row helper (defined at top level as required by Pine Script)
+rowHelper(tbl, y, lbl, pts, active, activeClr) =>
+  c = active ? activeClr : color.gray
+  k = active ? "+" + str.tostring(pts) : "0"
+  table.cell(tbl, 0, y, lbl, text_color=c, text_size=size.tiny,
+    text_halign=text.align_left)
+  table.cell(tbl, 1, y, k, text_color=c, text_size=size.tiny,
+    text_halign=text.align_right)
+
+var table tbl = table.new(position.top_right, 2, 15,
+  bgcolor=color.new(#0f172a, 85), border_width=1,
+  border_color=color.new(#334155, 70))
+
+if showScoreTable and barstate.islast
+  table.cell(tbl, 0, 0, "ICT Score Engine",
+    text_color=color.white, text_size=size.small, text_halign=text.align_center)
+  table.cell(tbl, 1, 0, "Score",
+    text_color=color.white, text_size=size.small)
+
+  biasActive = htfBias == "bullish" or htfBias == "bearish"
+  mssActive  = mssType == "BULLISH_MSS" or mssType == "BEARISH_MSS"
+  swpActive  = sweepType == "BULLISH" or sweepType == "BEARISH"
+  fvgActive  = fvgDetectedBullish or fvgDetectedBearish
+  obActive   = obDetectedBullish or obDetectedBearish
+  discActive = (htfBias == "bullish" and inDiscount)
+    or (htfBias == "bearish" and not inDiscount)
+  oteActive  = inOTE
+  kzActive   = inKillZone
+
+  rowHelper(tbl, 1,  "Bias",     wtBias,     biasActive, color.green)
+  rowHelper(tbl, 2,  "MSS",      wtMSS,      mssActive,  color.cyan)
+  rowHelper(tbl, 3,  "Sweep",    wtSweep,    swpActive,  color.orange)
+  rowHelper(tbl, 4,  "FVG",      wtFVG,      fvgActive,  color.purple)
+  rowHelper(tbl, 5,  "OB",       wtOB,       obActive,   color.red)
+  rowHelper(tbl, 6,  "DiscZone", wtDiscount, discActive,
+    htfBias == "bullish" ? color.green : color.red)
+  rowHelper(tbl, 7,  "OTE",      wtOTE,      oteActive,  color.yellow)
+  rowHelper(tbl, 8,  "Session",  wtSession,  kzActive,   color.green)
+
+  // Net score
+  netC = netScore >= 30 ? color.green :
+    netScore <= -30 ? color.red : color.gray
+  table.cell(tbl, 0, 9, "NET",
+    text_color=color.new(#64748b, 90), text_size=size.tiny)
+  table.cell(tbl, 1, 9, str.tostring(netScore),
+    text_color=netC, text_size=size.small, text_halign=text.align_right)
+
+  // Signal type
+  sigC = signalType == "STRONG_BUY" or signalType == "BUY" ? color.green :
+    signalType == "STRONG_SELL" or signalType == "SELL" ? color.red : color.gray
+  table.cell(tbl, 0, 10, signalType,
+    text_color=sigC, text_size=size.small, text_halign=text.align_center)
+  table.cell(tbl, 1, 10, "(" + str.tostring(confidenceStrength) + ")",
+    text_color=sigC, text_size=size.tiny)
+
+  // HTF Bias
+  htfC = htfBias == "bullish" ? color.green :
+    htfBias == "bearish" ? color.red : color.gray
+  table.cell(tbl, 0, 11, "HTF Bias",
+    text_color=color.new(#64748b, 90), text_size=size.tiny)
+  table.cell(tbl, 1, 11, str.upper(htfBias),
+    text_color=htfC, text_size=size.tiny, text_halign=text.align_right)
+
+  // Kill Zone
+  table.cell(tbl, 0, 12, "Kill Zone",
+    text_color=color.new(#64748b, 90), text_size=size.tiny)
+  table.cell(tbl, 1, 12, inKillZone ? "ACTIVE" : "INACTIVE",
+    text_color=kzActive ? color.green : color.gray,
+    text_size=size.tiny, text_halign=text.align_right)
+
+// ─── Alerts ───────────────────────────────────────────────────────────────
+
+alertcondition(entryConditionLong, "ICT Buy Signal",
+  "BUY {{ticker}} Score: {{close}}")
 alertcondition(entryConditionShort, "ICT Sell Signal",
-  "🔴 {{ticker}} SELL — Score: {{close}}")
+  "SELL {{ticker}} Score: {{close}}")
