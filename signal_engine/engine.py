@@ -104,9 +104,8 @@ class SignalEngine:
         Premium/Discount   (10 pts)       Premium/Discount   (10 pts)
         OTE Zone           (10 pts)       OTE Zone           (10 pts)
         Session/Kill Zone  (10 pts)       Session/Kill Zone  (10 pts)
-        Bullish news       (10 pts)       Bearish news       (10 pts)
         ──────────────────────────       ──────────────────────────
-        Max ~130 (capped 100)
+        Max ~120 (capped 100)
 
     Signal type from net score (bullish - bearish):
       net >= 60  → STRONG_BUY
@@ -123,7 +122,6 @@ class SignalEngine:
             "liquidity_sweep": 20,
             "fvg": 15,
             "order_block": 15,
-            "news": 10,
             "discount_zone": 10,
             "ote": 10,
             "session": 10,
@@ -137,7 +135,6 @@ class SignalEngine:
         df: pl.DataFrame,
         mss_type: Optional[str] = None,
         sweep_type: Optional[str] = None,
-        news_sentiment: float = 0.0,
         timeframe: str = "1h",
         htf_bias: Optional[str] = None,
     ) -> Dict:
@@ -148,7 +145,6 @@ class SignalEngine:
             df: Candle data with ICT detection columns
             mss_type: Type of MSS detected ("BULLISH_MSS" / "BEARISH_MSS" / None)
             sweep_type: Type of sweep detected ("BULLISH" / "BEARISH" / None)
-            news_sentiment: News sentiment score (-1 to 1)
             timeframe: Candle timeframe label
             htf_bias: Higher timeframe bias ("bullish"/"bearish"/"neutral")
         """
@@ -197,13 +193,7 @@ class SignalEngine:
         if has_bearish_ob:
             bearish_score += self.weights["order_block"]
 
-        # 6. News — directional
-        if news_sentiment > 0.5:
-            bullish_score += self.weights["news"]
-        elif news_sentiment < -0.5:
-            bearish_score += self.weights["news"]
-
-        # 7. Premium/Discount Zone + OTE — aligned to trend bias
+        # 6. Premium/Discount Zone + OTE — aligned to trend bias
         if "zone" not in df.columns or "in_ote" not in df.columns:
             df = self.pd_detector.compute_zones(df)
 
@@ -235,7 +225,7 @@ class SignalEngine:
                 bullish_score += self.weights["ote"] // 2
                 bearish_score += self.weights["ote"] // 2
 
-        # 8. Session / Kill Zone — bonus to the dominant bias direction
+        # 7. Session / Kill Zone — bonus to the dominant bias direction
         in_kill_zone = False
         active_kill_zones: List[str] = []
         active_sessions: List[str] = []
@@ -309,7 +299,7 @@ class SignalEngine:
                 "bearish_fvg": has_bearish_fvg,
                 "bullish_ob": has_bullish_ob,
                 "bearish_ob": has_bearish_ob,
-                "news_sentiment": news_sentiment,
+
                 "discount": in_discount,
                 "ote": in_ote,
                 "bias": bias,

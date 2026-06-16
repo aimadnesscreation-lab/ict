@@ -10,25 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi",
     "uvicorn",
-    "sqlalchemy[asyncio]",
-    "asyncpg",
-    "alembic",
     "pydantic-settings",
-    "pandas",
     "polars",
     "numpy",
     "loguru",
-    "redis",
-    "celery",
-    "python-dotenv",
-    "xgboost",
-    "lightgbm",
-    "catboost",
-    "scikit-learn",
-    "plotly",
     "httpx",
     "websockets",
-    "feedparser"
 ]
 
 [tool.pytest.ini_options]

@@ -21,7 +21,6 @@ from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.breaker_block import BreakerBlockDetector
-from news_engine.engine import NewsEngine
 from risk.manager import RiskManager
 from discord.bot import DiscordBot
 from demo_account import DemoAccount
@@ -32,8 +31,6 @@ _signal_id_counter = 0
 _recent_signals: List[Dict] = []
 _recent_trades: List[Dict] = []
 _performance_cache: Dict = {}
-_news_cache: List[Dict] = []
-_news_cache_time: Optional[datetime] = None
 
 # Health / debugging state
 _health: Dict = {
@@ -113,10 +110,6 @@ async def lifespan(app: FastAPI):
     bias_task = asyncio.create_task(_htf_bias_worker())
     _background_tasks.append(bias_task)
     logger.info("HTF bias worker scheduled (OKX 1h, 15min cycle).")
-
-    # Start news refresh worker
-    news_task = asyncio.create_task(_news_worker())
-    _background_tasks.append(news_task)
 
     # Health tracking
     _health["data_sources"] = ["OKX (crypto, 15s poll)"]
@@ -245,7 +238,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
 
         signal = _signal_engine.generate_signal(
             df, mss_type=mss_type, sweep_type=sweep_type,
-            news_sentiment=0.0, timeframe=tf,
+            timeframe=tf,
             htf_bias=htf_bias,
         )
         signal["symbol"] = symbol
@@ -540,32 +533,6 @@ async def _htf_bias_worker():
         await asyncio.sleep(900)
 
 
-async def _news_worker():
-    """Periodically fetch real news from Google News RSS."""
-    global _news_cache, _news_cache_time
-
-    news_engine = NewsEngine()
-
-    while True:
-        try:
-            articles = await news_engine.fetch_news()
-            if articles:
-                # Convert datetime objects to ISO strings for JSON serialization
-                for a in articles:
-                    if hasattr(a.get("published_at"), "isoformat"):
-                        a["published_at"] = a["published_at"].isoformat()
-                _news_cache = articles
-                _news_cache_time = datetime.utcnow()
-                logger.info(f"Fetched {len(articles)} news articles.")
-            else:
-                logger.warning("No news articles returned, keeping cache.")
-
-        except Exception as e:
-            logger.warning(f"News worker error: {e}. Retrying in 300s...")
-
-        # Refresh every 5 minutes
-        await asyncio.sleep(300)
-
 
 # ─── Root ───────────────────────────────────────────────────────────────
 
@@ -634,7 +601,7 @@ def format_signal(s: Dict) -> Dict:
             "discount": details.get("discount", False),
             "ote": details.get("ote", False),
             "bias": details.get("bias", "neutral"),
-            "news_sentiment": details.get("news_sentiment", 0.0),
+
             "in_kill_zone": s.get("in_kill_zone", False),
             "htf_bias": s.get("htf_bias", "neutral"),
             "htf_aligned": s.get("htf_aligned", True),
@@ -808,25 +775,6 @@ async def get_backtest_data(
     except Exception as e:
         logger.error(f"[Backtest] Fetch failed: {e}")
         raise HTTPException(status_code=502, detail=f"Failed to fetch backtest data: {e}")
-
-
-# ─── News (real via RSS) ──────────────────────────────────────────────
-
-@app.get("/news")
-async def get_news(limit: int = 10):
-    """Return recent financial news from Google News RSS (real data)."""
-    if not _news_cache:
-        return []
-
-    return [
-        {
-            "title": a.get("title", ""),
-            "source": a.get("source", "RSS"),
-            "published_at": str(a.get("published_at", "")),
-            "sentiment": a.get("sentiment", 0.0),
-        }
-        for a in _news_cache[:limit]
-    ]
 
 
 # ─── Trades (real, from backtesting) ─────────────────────────────────

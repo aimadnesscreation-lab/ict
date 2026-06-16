@@ -157,7 +157,7 @@ def extract_signal_at_candle(df_ict: pl.DataFrame, candle_idx: int,
 
     signal = _signal_engine.generate_signal(
         buf, mss_type=mss_type, sweep_type=sweep_type,
-        news_sentiment=0.0, timeframe="5m", htf_bias=htf_bias,
+        timeframe="5m", htf_bias=htf_bias,
     )
     signal["symbol"] = ""
     signal["id"] = None

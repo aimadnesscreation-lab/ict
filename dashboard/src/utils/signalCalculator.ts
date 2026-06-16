@@ -9,7 +9,6 @@ export interface SignalFlags {
   sweep: boolean;
   fvg: boolean;
   ob: boolean;
-  news_sentiment: number;
 }
 
 export interface ComputedSignal {
@@ -45,17 +44,7 @@ export function deriveFlags(tick: PriceTick): SignalFlags {
   // Order Block: price hovering near the middle of range (institutional zone)
   const ob = posInRange > 0.35 && posInRange < 0.65;
 
-  // News sentiment: deterministic from price data (no randomness)
-  // Uses volatility magnitude and position-in-range as a stable seed
-  const volatility = Math.min(Math.abs(change) / 5, 1);
-  const direction = change >= 0 ? 1 : -1;
-  // posInRange gives a deterministic 0-1 value, use it to add subtle nuance
-  const nuance = (posInRange * 2 - 1) * 0.1; // -0.1 to 0.1
-  const news_sentiment = Math.round(
-    Math.max(-1, Math.min(1, direction * (0.2 + volatility * 0.6) + nuance)) * 100,
-  ) / 100;
-
-  return { bias, mss, sweep, fvg, ob, news_sentiment };
+  return { bias, mss, sweep, fvg, ob };
 }
 
 // ── Weighted scoring ──────────────────────────────────────────────────
@@ -93,8 +82,6 @@ export function computeSignal(
   if (flags.sweep) score += weights.liquidity_sweep;
   if (flags.fvg) score += weights.fvg;
   if (flags.ob) score += weights.order_block;
-  if (flags.news_sentiment > 0.5) score += weights.news;
-
   // Invert for bearish bias: score becomes "strength of bearish signal"
   if (flags.bias === 'bearish') {
     // A lower raw score → stronger sell

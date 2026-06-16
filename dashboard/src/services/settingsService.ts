@@ -8,7 +8,6 @@ export interface SignalWeights {
   liquidity_sweep: number;
   order_block: number;
   fvg: number;
-  news: number;
 }
 
 export interface RiskSettings {
@@ -41,7 +40,6 @@ const DEFAULT_SETTINGS: AppSettings = {
     liquidity_sweep: 20,
     order_block: 15,
     fvg: 15,
-    news: 10,
   },
   risk: {
     max_risk_per_trade_pct: 1.0,

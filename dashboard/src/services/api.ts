@@ -38,7 +38,6 @@ export interface Signal {
     discount: boolean;
     ote: boolean;
     bias: string;
-    news_sentiment: number;
     in_kill_zone: boolean;
     htf_bias: string;
     htf_aligned: boolean;
@@ -113,13 +112,6 @@ export interface RiskStatus {
   account_balance: number;
 }
 
-export interface NewsArticle {
-  title: string;
-  source: string;
-  published_at: string;
-  sentiment: number;
-}
-
 export interface Candle {
   id: number;
   symbol: string;
@@ -188,7 +180,6 @@ function generateMockSignals(count = 10): Signal[] {
         discount: Math.random() > 0.5,
         ote: Math.random() > 0.6,
         bias: bias,
-        news_sentiment: Math.round((Math.random() * 1.6 - 0.8) * 100) / 100,
         in_kill_zone: Math.random() > 0.6,
         htf_bias: bias,
         htf_aligned: true,
@@ -317,16 +308,6 @@ export const tradingApi = {
       },
       [],
       'getCandles',
-    ),
-
-  getNews: (limit = 10): Promise<NewsArticle[]> =>
-    safeRequest(
-      async () => {
-        const res = await api.get(`/news?limit=${limit}`);
-        return res.data;
-      },
-      [],
-      'getNews',
     ),
 
   getTrades: (limit = 20, result?: string, symbol?: string): Promise<Trade[]> =>

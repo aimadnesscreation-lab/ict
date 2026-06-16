@@ -105,7 +105,7 @@ def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
 
     signal = _signal_engine.generate_signal(
         df, mss_type=mss_type, sweep_type=sweep_type,
-        news_sentiment=0.0, timeframe="5m", htf_bias=htf_bias,
+        timeframe="5m", htf_bias=htf_bias,
     )
     signal["symbol"] = ""
     signal["id"] = None

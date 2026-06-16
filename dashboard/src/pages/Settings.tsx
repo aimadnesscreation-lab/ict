@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import {
   Settings as SettingsIcon, RotateCcw, Sliders,
   ShieldCheck, BarChart3, AlertTriangle, TrendingUp,
-  TrendingDown, Radio, Activity, Newspaper, Gauge,
+  TrendingDown, Radio, Activity, Gauge,
   Wifi, WifiOff,
 } from 'lucide-react';
 import { useSettings, DEFAULT_SETTINGS } from '../services/settingsService';
@@ -22,7 +22,6 @@ const weightMeta: { key: keyof SignalWeights; label: string; desc: string; icon:
   { key: 'liquidity_sweep', label: 'Liquidity Sweep', desc: 'Liquidity grab detection', icon: <AlertTriangle size={18} />, color: 'text-amber-400' },
   { key: 'fvg', label: 'Fair Value Gap', desc: 'Imbalance / FVG detection', icon: <Activity size={18} />, color: 'text-purple-400' },
   { key: 'order_block', label: 'Order Block', desc: 'Institutional order block detection', icon: <BarChart3 size={18} />, color: 'text-rose-400' },
-  { key: 'news', label: 'News Sentiment', desc: 'News-driven sentiment analysis', icon: <Newspaper size={18} />, color: 'text-sky-400' },
 ];
 
 const riskMeta: { key: keyof RiskSettings; label: string; desc: string; suffix: string; min: number; max: number; step: number }[] = [
@@ -298,7 +297,6 @@ const SignalRow: React.FC<{ signal: ComputedSignal }> = ({ signal }) => {
     { key: 'Sweep', active: flags.sweep, color: 'text-amber-400' },
     { key: 'FVG', active: flags.fvg, color: 'text-purple-400' },
     { key: 'OB', active: flags.ob, color: 'text-rose-400' },
-    { key: 'News', active: flags.news_sentiment > 0.5, color: 'text-sky-400' },
   ];
 
   return (

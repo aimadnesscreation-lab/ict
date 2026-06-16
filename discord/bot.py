@@ -131,16 +131,6 @@ class DiscordBot:
                 "inline": False,
             })
 
-        # News sentiment
-        news = details.get("news_sentiment", 0.0)
-        if abs(news) > 0.1:
-            sentiment_icon = "📰🟢" if news > 0 else "📰🔴"
-            fields.append({
-                "name": "News Sentiment",
-                "value": f"{sentiment_icon} `{news:+.2f}`",
-                "inline": False,
-            })
-
         emoji = "🚀" if "BUY" in stype else "🔻" if "SELL" in stype else "➖"
 
         return {

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Search, ChevronDown, ChevronUp, Radio, Activity, TrendingUp, TrendingDown, Minus, X } from 'lucide-react';
+import { Search, ChevronDown, ChevronUp, Radio, Activity, X } from 'lucide-react';
 
 // Mirror of api/main.py FOREX_PRECISION for frontend price display
 const FOREX_PRECISION: Record<string, number> = {
@@ -303,25 +303,6 @@ const Signals: React.FC = () => {
                   <ConfluenceCard active={selectedSignal.meta_data.ob} label="Order Block" points={15} />
                   <ConfluenceCard active={selectedSignal.meta_data.discount} label="Discount Zone" points={10} />
                   <ConfluenceCard active={selectedSignal.meta_data.ote} label="OTE Zone" points={10} />
-                </div>
-              </div>
-
-              {/* News Sentiment */}
-              <div className="bg-slate-950 rounded-xl p-4 border border-slate-800">
-                <h4 className="text-sm font-bold text-slate-400 mb-2">News Sentiment</h4>
-                <div className="flex items-center gap-3">
-                  {selectedSignal.meta_data.news_sentiment > 0.3 ? (
-                    <TrendingUp className="text-emerald-400" size={24} />
-                  ) : selectedSignal.meta_data.news_sentiment < -0.3 ? (
-                    <TrendingDown className="text-rose-400" size={24} />
-                  ) : (
-                    <Minus className="text-slate-400" size={24} />
-                  )}
-                  <span className={`text-2xl font-bold font-mono ${
-                    selectedSignal.meta_data.news_sentiment > 0 ? 'text-emerald-400' : 'text-rose-400'
-                  }`}>
-                    {selectedSignal.meta_data.news_sentiment > 0 ? '+' : ''}{selectedSignal.meta_data.news_sentiment.toFixed(2)}
-                  </span>
                 </div>
               </div>
 
