@@ -2,7 +2,7 @@
 
 A production-ready algorithmic trading platform built on **ICT (Inner Circle Trader)** concepts — a mathematical framework for market structure analysis. The system processes real-time OHLCV data through a 7-module ICT pipeline, scores confluences with a dual-scoring signal engine, manages a forward-testing demo account, and surfaces everything through a React dashboard and Discord webhook alerts.
 
-**12-Month Backtest Result (BTC + ETH, Jul 2025 – Jun 2026): +384% return on $10k capital**
+**12-Month Backtest Result (BTC + ETH, Jul 2025 – Jun 2026): +486% return on $10k capital**
 
 ---
 
@@ -61,7 +61,7 @@ Stateful forward-testing engine:
 - **1% risk** per trade (of current balance)
 - **0.5× ATR** stop loss, **1:2** risk-reward (TP = 2 × SL distance)
 - **0 min** re-entry cooldown (was 60 min for ETH, optimized away)
-- **min_score = 70** for entries (was 80 for ETH, optimized away)
+- **min_score = 60** for entries (was 70, optimized for highest risk-adjusted returns)
 - Max **3 open positions** across all symbols
 - **3% daily loss limit** (circuit breaker)
 - Tracks P&L, win rate, profit factor, max drawdown, average R:R
@@ -94,7 +94,7 @@ Stateful forward-testing engine:
 | Parameter | BTCUSDT | ETHUSDT |
 |---|---|---|
 | **ATR SL Multiplier** | 0.5× | 0.5× |
-| **Min Score Threshold** | 70 | 70 |
+| **Min Score Threshold** | 60 | 60 |
 | **Re-entry Cooldown** | 0 min | 0 min |
 | **Risk Per Trade** | 1% | 1% |
 | **Max Positions** | 3 (shared) | 3 (shared) |
@@ -109,6 +109,7 @@ Stateful forward-testing engine:
 | Original (BTC 1.0×/0cd/70, ETH 2.0×/60cd/80) | +$2,147 | +$3,867 | **+$6,013** |
 | Tight SL (both 0.5×, ETH 60cd/80) | +$5,135 | +$19,786 | **+$24,921** |
 | **Unified (both 0.5×/0cd/70)** | **+$18,635** | **+$19,786** | **+$38,421** |
+| **Optimized (both 0.5×/0cd/60)** | **+$25,582** | **+$23,042** | **+$48,624** |
 
 ---
 
@@ -204,6 +205,10 @@ The live deployment is at: `https://ict-production-b1a8.up.railway.app`
 - Captures every trade with full metadata: entry/exit time, SL distance, ATR, held candles, consecutive loss streaks
 - Outputs detailed analysis: trade density, re-entry patterns, top losses
 - Saves raw trade log as JSON for further analysis
+
+---
+
+> **Forex strategy removed.** The codebase now focuses exclusively on crypto (BTC, ETH via OKX). Prior forex-related files (`backtest_forex.py`, `forex/` data directory, dashboard forex references) have been deleted.
 
 ---
 
