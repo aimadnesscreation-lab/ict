@@ -98,7 +98,8 @@ async def fetch_backtest_data(symbol: str, bar: str, days: int,
         return pl.DataFrame()
 
 
-def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float) -> Optional[Dict]:
+def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
+                       min_score: int = 70) -> Optional[Dict]:
     """Run full ICT pipeline on a buffer slice. Returns signal dict if qualifying, else None."""
     df = buffer.clone()
     if len(df) < 20:
@@ -142,8 +143,8 @@ def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float)
     signal_type = signal.get("signal_type", "NEUTRAL")
     in_kz = signal.get("in_kill_zone", False)
 
-    # Same filters as live system: score≥80 + kill zone + HTF-aligned (all 5m entries)
-    if score < 80 or not in_kz or signal_type == "NEUTRAL":
+    # Per-symbol score threshold + kill zone + HTF-aligned (all 5m entries)
+    if score < min_score or not in_kz or signal_type == "NEUTRAL":
         return None
     if htf_bias != "neutral" and not signal.get("htf_aligned", True):
         return None
@@ -245,6 +246,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
         sl_multiplier=2.0 if "ETH" in symbol.upper() else 1.0,
         reentry_cooldown_minutes=60,
+        symbol_min_scores={symbol.upper(): 70},
     )
 
     signals_gen = 0
@@ -478,7 +480,7 @@ async def main():
         print(f"  📊 SINGLE MONTH BACKTEST — ending {end_date.strftime('%b %d, %Y')}")
     else:
         print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
-    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥80 + KZ + HTF-aligned | 5m entries | ETH:2.0× BTC:1.5× ATR SL")
+    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥70 + KZ + HTF-aligned | 5m entries | ETH:2.0× BTC:1.0× ATR SL")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
 

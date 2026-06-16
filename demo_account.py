@@ -59,7 +59,8 @@ class DemoAccount:
                  sl_multiplier: float = 1.5,
                  reentry_cooldown_minutes: int = 60,
                  fixed_sl_pct: float = 0.0,
-                 symbol_sl_multipliers: Optional[Dict[str, float]] = None):
+                 symbol_sl_multipliers: Optional[Dict[str, float]] = None,
+                 symbol_min_scores: Optional[Dict[str, int]] = None):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
@@ -70,6 +71,7 @@ class DemoAccount:
         self.reentry_cooldown_minutes = reentry_cooldown_minutes
         self.fixed_sl_pct = fixed_sl_pct
         self.symbol_sl_multipliers = symbol_sl_multipliers or {}  # per-symbol ATR multiplier overrides
+        self.symbol_min_scores = symbol_min_scores or {}  # per-symbol score threshold overrides
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
@@ -127,8 +129,9 @@ class DemoAccount:
             timestamp = signal.get("timestamp")
 
             # Only act on high-conviction signals in kill zone (match Discord criteria)
-            # Score ≥ 80 ensures at least 4-5 ICT confluences (bias + MSS + KZ + 1 more)
-            if score < 80 or not signal.get("in_kill_zone", False):
+            # Default score ≥ 80, with per-symbol overrides via symbol_min_scores
+            min_score = self.symbol_min_scores.get(symbol, 80)
+            if score < min_score or not signal.get("in_kill_zone", False):
                 continue
 
             # Skip if already in a position for this symbol

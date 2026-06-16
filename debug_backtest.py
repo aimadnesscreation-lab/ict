@@ -76,7 +76,8 @@ async def fetch_data(symbol: str, bar: str, days: int = 30,
         return pl.DataFrame(rows).sort("timestamp")
 
 
-def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float) -> Optional[Dict]:
+def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
+                       min_score: int = 70) -> Optional[Dict]:
     df = buffer.clone()
     if len(df) < 20:
         return None
@@ -119,8 +120,8 @@ def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float)
     signal_type = signal.get("signal_type", "NEUTRAL")
     in_kz = signal.get("in_kill_zone", False)
 
-    # Score ≥ 80 + KZ on 5m entries (all 5m candles eligible, with cooldown)
-    if score < 80 or not in_kz or signal_type == "NEUTRAL":
+    # Per-symbol score threshold + KZ + cooldown
+    if score < min_score or not in_kz or signal_type == "NEUTRAL":
         return None
     if htf_bias != "neutral" and not signal.get("htf_aligned", True):
         return None
@@ -156,7 +157,8 @@ async def debug_backtest_symbol(symbol: str, before: Optional[str] = None) -> Di
     demo = DemoAccount(initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
                        max_daily_loss_pct=3.0, max_open_positions=3,
                        sl_multiplier=sl_mult,
-                       reentry_cooldown_minutes=60)
+                       reentry_cooldown_minutes=60,
+                       symbol_min_scores={symbol.upper(): 70})
 
     MAX_5M = 288
     HTF_REFRESH = 288
