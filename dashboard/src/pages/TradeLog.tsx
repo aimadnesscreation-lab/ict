@@ -7,12 +7,7 @@ import {
 } from 'lucide-react';
 import { tradingApi, type OpenPosition } from '../services/api';
 
-// Mirror of api/main.py FOREX_PRECISION for frontend display
-const FOREX_PRECISION: Record<string, number> = {
-  EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
-};
-
-const pricePrecision = (symbol: string): number => FOREX_PRECISION[symbol] ?? 2;
+const pricePrecision = (symbol: string): number => 2;
 
 const TradeLog: React.FC = () => {
   const [resultFilter, setResultFilter] = useState<string>('ALL');

@@ -18,10 +18,7 @@ interface DemoAccountData {
   current_drawdown_pct: number;
 }
 
-// Mirror of api/main.py FOREX_PRECISION for frontend price display
-const FOREX_PRECISION: Record<string, number> = {
-  EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
-};
+const pricePrecision = (symbol: string): number => 2;
 
 const _NOW = Date.now();
 
@@ -276,7 +273,7 @@ const SignalRow = ({ symbol, type, score, price, killZone, time }: {
           </div>
         </div>
       </td>
-      <td className="px-6 py-4 font-mono text-sm">{price.toFixed(FOREX_PRECISION[symbol] ?? 2)}</td>
+      <td className="px-6 py-4 font-mono text-sm">{price.toFixed(pricePrecision(symbol))}</td>
       <td className="px-6 py-4">
         {killZone ? (
           <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">

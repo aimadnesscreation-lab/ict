@@ -5,8 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { tradingApi } from '../services/api';
 
 const CRYPTO_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
-const FOREX_SYMBOLS = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'];
-const ALL_SYMBOLS = [...CRYPTO_SYMBOLS, ...FOREX_SYMBOLS];
+const ALL_SYMBOLS = [...CRYPTO_SYMBOLS];
 const TIMEFRAMES = ['1h', '5m', '15m'];
 
 const _NOW = Math.floor(Date.now() / 1000);
@@ -24,10 +23,10 @@ const Charts: React.FC = () => {
     refetchInterval: 60_000,
   });
 
-  // Stable mock fallback for forex pairs or when API is down
+  // Stable mock fallback when API is down
   const mockCandles = useMemo(() => {
-    const base = symbol.startsWith('XAU') ? 2340 : symbol.startsWith('BTC') ? 68000 : symbol.startsWith('ETH') ? 3500 : 1.10;
-    const range = symbol.startsWith('XAU') ? 10 : symbol.startsWith('BTC') ? 500 : symbol.startsWith('ETH') ? 50 : 0.01;
+    const base = symbol.startsWith('BTC') ? 68000 : 3500;
+    const range = symbol.startsWith('BTC') ? 500 : 50;
     const step = timeframe === '5m' ? 300 : timeframe === '15m' ? 900 : 3600;
     return Array.from({ length: 100 }, (_, i) => ({
       time: Math.floor(_NOW - (100 - i) * step) as any,
@@ -97,7 +96,7 @@ const Charts: React.FC = () => {
           <h4 className="text-xs font-bold text-slate-500 uppercase mb-2">Symbol</h4>
           <div className="text-lg font-bold text-emerald-400">{symbol}</div>
           <div className="text-xs text-slate-500 mt-1">
-            {isCrypto ? 'Real CoinGecko data' : 'Mock data (set TWELVEDATA_API_KEY for live)'}
+            {'Real OKX data'}
           </div>
         </div>
         <div className="bg-slate-900 p-4 border border-slate-800 rounded-xl">
@@ -108,10 +107,10 @@ const Charts: React.FC = () => {
         <div className="bg-slate-900 p-4 border border-slate-800 rounded-xl">
           <h4 className="text-xs font-bold text-slate-500 uppercase mb-2">Data Source</h4>
           <div className={`text-lg font-bold ${isCrypto ? 'text-cyan-400' : 'text-amber-400'}`}>
-            {isCrypto ? 'CoinGecko API' : 'Mock Data'}
+            {'OKX API'}
           </div>
           <div className="text-xs text-slate-500 mt-1">
-            {isCrypto ? 'Live cryptocurrency OHLC' : 'Forex requires Twelve Data API key'}
+            {'Live cryptocurrency OHLC'}
           </div>
         </div>
       </div>

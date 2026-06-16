@@ -69,7 +69,7 @@ _demo_account = DemoAccount(
     sl_multiplier=1.5,
     reentry_cooldown_minutes=0,
     symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
-    symbol_min_scores={"BTCUSDT": 70, "ETHUSDT": 70},
+    symbol_min_scores={"BTCUSDT": 60, "ETHUSDT": 60},
 )
 
 # ── Binance crypto data ──────────────────────────────────────────────

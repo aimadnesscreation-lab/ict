@@ -127,12 +127,11 @@ export interface Candle {
 // ── Mock fallback data (used when API is unreachable) ───────────────────
 
 function generateMockSignals(count = 10): Signal[] {
-  const symbols = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY', 'BTCUSDT', 'ETHUSDT'];
+  const symbols = ['BTCUSDT', 'ETHUSDT'];
   const types: Signal['signal_type'][] = ['STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL'];
   const weights = [15, 25, 20, 25, 15];
   const basePrices: Record<string, number> = {
-    EURUSD: 1.1042, GBPUSD: 1.2654, XAUUSD: 2342.10,
-    USDJPY: 151.24, BTCUSDT: 68420, ETHUSDT: 3520,
+    BTCUSDT: 68420, ETHUSDT: 3520,
   };
 
   const weightedPick = () => {
@@ -191,10 +190,10 @@ function generateMockSignals(count = 10): Signal[] {
 }
 
 function generateMockTrades(count = 20): Trade[] {
-  const symbols = ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY', 'BTCUSDT'];
+  const symbols = ['BTCUSDT', 'ETHUSDT'];
   const results: Trade['result'][] = ['WIN', 'WIN', 'WIN', 'LOSS', 'LOSS', 'BREAK_EVEN'];
   const basePrices: Record<string, number> = {
-    EURUSD: 1.10, GBPUSD: 1.26, XAUUSD: 2340, USDJPY: 151, BTCUSDT: 68000,
+    BTCUSDT: 68000, ETHUSDT: 3500,
   };
 
   return Array.from({ length: count }, (_, i) => {

@@ -2,10 +2,7 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, ChevronDown, ChevronUp, Radio, Activity, X } from 'lucide-react';
 
-// Mirror of api/main.py FOREX_PRECISION for frontend price display
-const FOREX_PRECISION: Record<string, number> = {
-  EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
-};
+const pricePrecision = (symbol: string): number => 2;
 
 const _NOW = Date.now();
 import { tradingApi } from '../services/api';
@@ -192,7 +189,7 @@ const Signals: React.FC = () => {
                       <span className="font-mono text-sm">{Math.round(signal.confidence * 100)}%</span>
                     </td>
                     <td className="px-6 py-4 font-mono text-sm">
-                      {signal.price.toFixed(FOREX_PRECISION[signal.symbol] ?? 2)}
+                      {signal.price.toFixed(pricePrecision(signal.symbol))}
                     </td>
                     <td className="px-6 py-4 text-slate-500 text-xs whitespace-nowrap">{formatTime(signal.timestamp)}</td>
                     <td className="px-6 py-4">
@@ -233,7 +230,7 @@ const Signals: React.FC = () => {
                 </div>
                 <div className="text-right">
                   <div className="text-2xl font-bold font-mono">
-                    {selectedSignal.price.toFixed(FOREX_PRECISION[selectedSignal.symbol] ?? 2)}
+                    {selectedSignal.price.toFixed(pricePrecision(selectedSignal.symbol))}
                   </div>
                   <div className="text-xs text-slate-500">
                     {new Date(selectedSignal.timestamp).toLocaleString()}

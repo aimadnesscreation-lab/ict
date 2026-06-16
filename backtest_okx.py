@@ -263,8 +263,8 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     rows = df_5m_full.to_dicts()
     total_candles = len(rows)
 
-    # Both symbols now use identical settings: 0.5× SL, no cooldown, min_score=70
-    symbol_min_score = 70
+    # Both symbols now use identical settings: 0.5× SL, no cooldown, min_score=60
+    symbol_min_score = 60
 
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
@@ -509,7 +509,7 @@ async def main():
     else:
         print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
     print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | 5m entries")
-    print(f"  Both symbols: 0.5× SL, 0min cooldown, min_score=70")
+    print(f"  Both symbols: 0.5× SL, 0min cooldown, min_score=60")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
 

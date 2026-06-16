@@ -21,19 +21,16 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 
 // ── Fallback mock data generator (when WebSocket is unreachable) ──────
 
-const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'];
+const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 const FALLBACK_BASE: Record<string, number> = {
-  BTCUSDT: 68420, ETHUSDT: 3520, EURUSD: 1.1042, GBPUSD: 1.2654, XAUUSD: 2342.10, USDJPY: 151.24,
-};
-const FALLBACK_PRECISION: Record<string, number> = {
-  BTCUSDT: 2, ETHUSDT: 2, EURUSD: 4, GBPUSD: 4, XAUUSD: 2, USDJPY: 3,
+  BTCUSDT: 68420, ETHUSDT: 3520,
 };
 
 function generateMockTick(prices: Record<string, number>): PriceTick {
   const symbol = FALLBACK_SYMBOLS[Math.floor(Math.random() * FALLBACK_SYMBOLS.length)];
   const base = prices[symbol] ?? FALLBACK_BASE[symbol];
   const drift = base * (Math.random() - 0.5) * 0.0016;
-  const prec = FALLBACK_PRECISION[symbol] ?? 4;
+  const prec = 2;
   const newPrice = Math.round((base + drift) * (10 ** prec)) / (10 ** prec);
   prices[symbol] = newPrice;
   return {

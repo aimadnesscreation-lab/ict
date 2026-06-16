@@ -14,7 +14,7 @@ interface LayoutProps {
   onPageChange: (page: string) => void;
 }
 
-const TICKER_SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'];
+const TICKER_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 
 const Layout: React.FC<LayoutProps> = ({ children, activePage, onPageChange }) => {
   const { prices, connected } = usePriceStream();
@@ -29,8 +29,8 @@ const Layout: React.FC<LayoutProps> = ({ children, activePage, onPageChange }) =
           <span className="font-bold text-slate-300">{symbol.replace('USDT', '')}</span>
           <span className="font-mono font-bold text-slate-100">
             {tick.price.toLocaleString(undefined, {
-              minimumFractionDigits: symbol.startsWith('XAU') ? 2 : symbol.startsWith('BTC') || symbol.startsWith('ETH') ? 2 : 4,
-              maximumFractionDigits: symbol.startsWith('XAU') ? 2 : symbol.startsWith('BTC') || symbol.startsWith('ETH') ? 2 : 4,
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
             })}
           </span>
           <span className={`flex items-center gap-0.5 font-mono text-[10px] font-bold ${isUp ? 'text-emerald-400' : 'text-rose-400'}`}>

@@ -325,7 +325,7 @@ class DemoAccount:
             # ATR-based mode: use per-symbol override if available, else default
             effective_mult = self.symbol_sl_multipliers.get(symbol, self.sl_multiplier)
             sl_distance = atr_value * effective_mult
-        tp_distance = sl_distance * 2  # Maintain 1:2 RR
+        tp_distance = sl_distance * 2.0  # Fixed 1:2 risk-reward
 
         if side == "LONG":
             stop_loss = price - sl_distance

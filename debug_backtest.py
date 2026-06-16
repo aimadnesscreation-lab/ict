@@ -77,7 +77,7 @@ async def fetch_data(symbol: str, bar: str, days: int = 30,
 
 
 def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
-                       min_score: int = 70) -> Optional[Dict]:
+                       min_score: int = 60) -> Optional[Dict]:
     df = buffer.clone()
     if len(df) < 20:
         return None
@@ -158,7 +158,7 @@ async def debug_backtest_symbol(symbol: str, before: Optional[str] = None) -> Di
                        max_daily_loss_pct=3.0, max_open_positions=3,
                        sl_multiplier=sl_mult,
                        reentry_cooldown_minutes=0,
-                       symbol_min_scores={symbol.upper(): 70})
+                       symbol_min_scores={symbol.upper(): 60})
 
     MAX_5M = 288
     HTF_REFRESH = 288
