@@ -98,13 +98,14 @@ async def fetch_backtest_data(symbol: str, bar: str, days: int,
         return pl.DataFrame()
 
 
-def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
-                       min_score: int = 70) -> Optional[Dict]:
-    """Run full ICT pipeline on a buffer slice. Returns signal dict if qualifying, else None."""
-    df = buffer.clone()
-    if len(df) < 20:
-        return None
+def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
+    """Run the full 7-module ICT pipeline once on a DataFrame.
 
+    This is the critical optimization: instead of re-running the entire
+    ICT pipeline on every candle (as the old run_ict_on_buffer did),
+    we compute everything once in a single vectorized pass.
+    """
+    df = df.clone()
     df = _ict_ms.detect_swings(df)
     df = _ict_ms.detect_bos_mss(df)
     df = _ict_fvg.detect_fvgs(df)
@@ -113,37 +114,59 @@ def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
     df = _ict_sessions.detect_sessions(df)
     df = _ict_pd.compute_zones(df)
     df = _ict_breaker.detect_breaker_blocks(df)
+    return df
+
+
+def extract_signal_at_candle(df_ict: pl.DataFrame, candle_idx: int,
+                             htf_bias: str, current_price: float,
+                             min_score: int = 80) -> Optional[Dict]:
+    """
+    Extract signal from pre-computed ICT columns at a given candle index.
+
+    Uses a tiny 5-row tail slice of the pre-computed DataFrame (instead of
+    re-running the full ICT pipeline on a 288-candle buffer every time).
+
+    The signal engine's `generate_signal` only looks at:
+      - `df.tail(1)` for current price, timestamp, zone, OTE
+      - `df["fvg_type"].tail(5).any()` for recent FVG presence
+      - `df["ob_type"].tail(5).any()` for recent OB presence
+    So a 5-row slice is all we need.
+    """
+    if candle_idx < 5:
+        return None
+
+    # Tiny slice: just the last 5 closed candles (up to candle_idx - 1)
+    buf = df_ict.slice(candle_idx - 5, min(5, candle_idx))
+    if len(buf) < 2:
+        return None
 
     mss_type = None
-    if "mss" in df.columns:
-        latest_mss = df["mss"].drop_nulls().tail(1)
+    if "mss" in buf.columns:
+        latest_mss = buf["mss"].drop_nulls().tail(1)
         if len(latest_mss) > 0:
             mss_type = latest_mss[0]
 
     sweep_type = None
-    if "liquidity_sweep_type" in df.columns:
-        latest_sweep = df["liquidity_sweep_type"].drop_nulls().tail(1)
+    if "liquidity_sweep_type" in buf.columns:
+        latest_sweep = buf["liquidity_sweep_type"].drop_nulls().tail(1)
         if len(latest_sweep) > 0:
             sweep_type = latest_sweep[0]
 
+    latest_row = buf.tail(1).to_dicts()[0]
+    atr = latest_row.get("atr", 0) or 0.0
+
     signal = _signal_engine.generate_signal(
-        df, mss_type=mss_type, sweep_type=sweep_type,
+        buf, mss_type=mss_type, sweep_type=sweep_type,
         news_sentiment=0.0, timeframe="5m", htf_bias=htf_bias,
     )
     signal["symbol"] = ""
     signal["id"] = None
-
-    if "atr" in df.columns:
-        latest_atr = df["atr"].tail(1).to_list()
-        signal["atr"] = latest_atr[0] if latest_atr and latest_atr[0] is not None else 0.0
-    else:
-        signal["atr"] = 0.0
+    signal["atr"] = atr
 
     score = signal.get("score", 0)
     signal_type = signal.get("signal_type", "NEUTRAL")
     in_kz = signal.get("in_kill_zone", False)
 
-    # Per-symbol score threshold + kill zone + HTF-aligned (all 5m entries)
     if score < min_score or not in_kz or signal_type == "NEUTRAL":
         return None
     if htf_bias != "neutral" and not signal.get("htf_aligned", True):
@@ -240,25 +263,36 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     rows = df_5m_full.to_dicts()
     total_candles = len(rows)
 
-    # 4. Initialize DemoAccount (fresh each symbol)
+    # Compute per-symbol thresholds (used by both DemoAccount and extract_signal_at_candle)
+    is_btc = "BTC" in symbol.upper()
+    symbol_min_score = 70 if is_btc else 80
+
+    # 4. Initialize DemoAccount with per-symbol settings
+    # BTC: Config A (original) — score≥70, 1.0× ATR SL, no cooldown (maximizes volume in trends)
+    # ETH: Config F — score≥80, 2.0× ATR SL, 60min cooldown (quality over quantity)
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
-        sl_multiplier=2.0 if "ETH" in symbol.upper() else 1.0,
-        reentry_cooldown_minutes=60,
-        symbol_min_scores={symbol.upper(): 70},
+        sl_multiplier=1.0 if is_btc else 2.0,
+        reentry_cooldown_minutes=0 if is_btc else 60,
+        symbol_min_scores={symbol.upper(): symbol_min_score},
     )
 
     signals_gen = 0
     signals_kept = 0
     bias_changes = 0
 
-    # 5m buffer limit matching live system (BINANCE_BUFFER_LIMITS in api/main.py)
-    MAX_5M_BUFFER = 288  # live system: 288 candles in 5m buffer
+    # Pre-compute all ICT columns once on the full 5m dataset
+    # This replaces the per-candle run_ict_on_buffer calls (~8,640 calls → 1 call)
+    logger.info(f"    Pre-computing ICT columns...")
+    t_ict = datetime.utcnow()
+    df_ict = precompute_ict(df_5m_full)
+    ict_elapsed = (datetime.utcnow() - t_ict).total_seconds()
+    logger.info(f"    ICT pre-compute: {ict_elapsed:.1f}s for {len(df_ict)} rows")
 
     # 5. Process in chunks with periodic HTF bias recomputation
     HTF_REFRESH_INTERVAL = 288  # ~1 day in 5m candles
-    warmup = 50
+    warmup = 50  # need enough data for rolling indicators
     i = warmup
     last_bias_refresh = 0
 
@@ -293,24 +327,22 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 if reason is not None:
                     close_position(demo, pos, price, reason, current_ts)
 
-            # Step 2: Run ICT on 5m buffer every candle for real-time entries
+            # Step 2: Extract signal from pre-computed ICT columns (fast: no pipeline re-run)
             aligned = []
-            buf_start = max(0, candle_idx - MAX_5M_BUFFER) if candle_idx > MAX_5M_BUFFER else 0
-            buf = df_5m_full.slice(buf_start, candle_idx - buf_start)
-            if len(buf) >= 15:
-                sig = run_ict_on_buffer(buf, htf_bias, current_price)
-                if sig is not None:
-                    sig["symbol"] = symbol
-                    sig["timestamp"] = current_ts
-                    signals_gen += 1
+            sig = extract_signal_at_candle(df_ict, candle_idx, htf_bias, current_price,
+                                             min_score=symbol_min_score)
+            if sig is not None:
+                sig["symbol"] = symbol
+                sig["timestamp"] = current_ts
+                signals_gen += 1
 
-                    # HTF alignment filter
-                    if htf_bias != "neutral":
-                        if sig.get("htf_aligned", True):
-                            aligned = [sig]
-                            signals_kept += 1
-                    else:
-                        aligned = []
+                # HTF alignment filter
+                if htf_bias != "neutral":
+                    if sig.get("htf_aligned", True):
+                        aligned = [sig]
+                        signals_kept += 1
+                else:
+                    aligned = []
 
             # Step 3: Feed signals to DemoAccount
             demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
@@ -480,7 +512,8 @@ async def main():
         print(f"  📊 SINGLE MONTH BACKTEST — ending {end_date.strftime('%b %d, %Y')}")
     else:
         print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
-    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | Score≥70 + KZ + HTF-aligned | 5m entries | ETH:2.0× BTC:1.0× ATR SL")
+    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | 5m entries")
+    print(f"  BTC: Config A (score≥70, 1.0× SL, no cooldown) | ETH: Config F (score≥80, 2.0× SL, 60min cd)")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
 

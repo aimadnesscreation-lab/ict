@@ -158,7 +158,7 @@ async def debug_backtest_symbol(symbol: str, before: Optional[str] = None) -> Di
                        max_daily_loss_pct=3.0, max_open_positions=3,
                        sl_multiplier=sl_mult,
                        reentry_cooldown_minutes=60,
-                       symbol_min_scores={symbol.upper(): 70})
+                       symbol_min_scores={symbol.upper(): 80})
 
     MAX_5M = 288
     HTF_REFRESH = 288

@@ -335,7 +335,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
             stype = s.get("signal_type", "NEUTRAL")
             score_val = s.get("score", 0)
             in_kz = s.get("in_kill_zone", False)
-            if score_val >= 70 and in_kz:
+            if score_val >= 80 and in_kz:
                 if symbol in _demo_account.open_positions:
                     logger.info(f"[Discord] Skipping {symbol} {stype} — position already open")
                     continue
