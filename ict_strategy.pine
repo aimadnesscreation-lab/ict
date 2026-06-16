@@ -80,8 +80,8 @@ htfBias = htfDiffPct >  emaThreshold ? "bullish" :
 swingHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
 swingLow  = ta.pivotlow(low, pivotLookback, pivotLookback)
 
-var float lastSwingHigh = na
-var float lastSwingLow  = na
+var lastSwingHigh = na
+var lastSwingLow  = na
 if not na(swingHigh)
   lastSwingHigh := swingHigh
 if not na(swingLow)
