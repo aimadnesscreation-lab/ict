@@ -36,6 +36,7 @@ from demo_account import DemoAccount, ClosedTrade
 
 RAILWAY_URL = "https://ict-production-b1a8.up.railway.app"
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# Default capital; override with --capital <amount> (e.g. --capital 5000)
 BACKTEST_CAPITAL = 10_000.0
 MAX_OPEN_POSITIONS = 3
 
@@ -486,6 +487,8 @@ async def main():
                         help="Run a single month at this offset (0=newest). Overrides --months.")
     parser.add_argument("--parallel", action="store_true",
                         help="Run both symbols per month in parallel")
+    parser.add_argument("--capital", type=float, default=None,
+                        help="Starting capital (default: 10000)")
     args = parser.parse_args()
 
     logger.remove()
@@ -508,7 +511,12 @@ async def main():
         print(f"  📊 SINGLE MONTH BACKTEST — ending {end_date.strftime('%b %d, %Y')}")
     else:
         print(f"  📊 {num_months}-MONTH ROLLING BACKTEST — ICT + DemoAccount")
-    print(f"  Capital: ${BACKTEST_CAPITAL} | 1% risk | 1:2 RR | 5m entries")
+    # Set dynamic capital from CLI arg if provided
+    global BACKTEST_CAPITAL
+    if args.capital is not None:
+        BACKTEST_CAPITAL = args.capital
+
+    print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
     print(f"  Both symbols: 0.5× SL, 0min cooldown, min_score=60")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
