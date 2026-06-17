@@ -410,10 +410,10 @@ def print_month_result(month_num: int, month_label: str, data_range: str,
               f"RR: {r['avg_rr']:.2f}")
 
 
-def print_combined_summary(all_results: List[Dict]):
-    """Print aggregated 12-month summary."""
+def print_combined_summary(all_results: List[Dict], num_months: int):
+    """Print aggregated multi-month summary."""
     print(f"\n\n{'='*70}")
-    print(f"  12-MONTH COMBINED SUMMARY")
+    print(f"  {num_months}-MONTH COMBINED SUMMARY")
     print(f"{'='*70}")
 
     all_btc = [r for r in all_results if r["symbol"] == "BTCUSDT"]
@@ -472,7 +472,7 @@ def print_combined_summary(all_results: List[Dict]):
     print(f"  Win rate:     {wr:.1f}%")
     print(f"  Total P&L:    ${combined_profit:.2f}")
     print(f"  Total return: {(combined_profit / BACKTEST_CAPITAL) * 100:.2f}%")
-    print(f"  Avg monthly:  ${combined_profit / 12:.2f}")
+    print(f"  Avg monthly:  ${combined_profit / num_months:.2f}")
 
 
 async def main():
@@ -481,9 +481,9 @@ async def main():
     parser = argparse.ArgumentParser(
         description="12-Month Rolling Backtest of ICT Strategy")
     parser.add_argument("--months", type=int, default=12,
-                        help="Number of months to backtest (1-12, default 12)")
+                        help="Number of months to backtest (default 12)")
     parser.add_argument("--offset", type=int, default=None,
-                        help="Run a single month at this offset (0=newest, 11=oldest). Overrides --months.")
+                        help="Run a single month at this offset (0=newest). Overrides --months.")
     parser.add_argument("--parallel", action="store_true",
                         help="Run both symbols per month in parallel")
     args = parser.parse_args()
@@ -497,9 +497,9 @@ async def main():
 
     if args.offset is not None:
         # Single-month mode
-        offsets = [max(0, min(args.offset, 11))]
+        offsets = [max(0, args.offset)]
     else:
-        num_months = min(max(args.months, 1), 12)
+        num_months = max(args.months, 1)
         offsets = list(reversed(range(num_months)))
 
     print("\n" + "=" * 70)
@@ -571,7 +571,7 @@ async def main():
             print(f"\n  JSON:{json.dumps(summary)}")
 
     if args.offset is None:
-        print_combined_summary(all_raw_results)
+        print_combined_summary(all_raw_results, num_months)
 
         print(f"\n\n{'='*70}")
         print(f"  MONTHLY BREAKDOWN")

@@ -11,6 +11,10 @@ import httpx
 import polars as pl
 from loguru import logger
 from contextlib import asynccontextmanager
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # ── Real data imports ─────────────────────────────────────────────────
 # CoinGecko removed — using OKX for all crypto data
@@ -25,6 +29,7 @@ from risk.manager import RiskManager
 from discord.bot import DiscordBot
 from demo_account import DemoAccount
 from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
+from execution.executor import LiveExecutor
 
 # ── App state ─────────────────────────────────────────────────────────
 _signal_id_counter = 0
@@ -71,6 +76,8 @@ _demo_account = DemoAccount(
     symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
     symbol_min_scores={"BTCUSDT": 60, "ETHUSDT": 60},
 )
+
+_live_executor = LiveExecutor(mode=os.getenv("EXCHANGE_MODE", "demo"))
 
 # ── Binance crypto data ──────────────────────────────────────────────
 BINANCE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -297,7 +304,43 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
                 s["trigger_price"] = s["price"]
                 s["price"] = live
 
+        # Process in the built-in simulator (DemoAccount)
         _demo_account.process_signals(all_signals, current_prices)
+
+        # ─── Live / Exchange Demo Execution ───
+        # This part handles real API calls to OKX
+        for s in all_signals:
+            if s.get("score", 0) >= 80 and s.get("in_kill_zone", False) and s.get("htf_aligned", True):
+                # Only execute if a position is not already open for this symbol on the exchange
+                # (You'd ideally check _live_executor.get_open_positions() here)
+                
+                # Calculate SL/TP levels based on signal ATR
+                atr = s.get("atr", 0)
+                price = s.get("price", 0)
+                sl_mult = 0.5 # Same as backtest
+                sl_dist = atr * sl_mult
+                tp_dist = sl_dist * 2.0
+                
+                if "BUY" in s["signal_type"]:
+                    sl = price - sl_dist
+                    tp = price + tp_dist
+                else:
+                    sl = price + sl_dist
+                    tp = price - tp_dist
+                
+                # Risk 1% of exchange balance
+                balance = await _live_executor.get_balance()
+                qty = risk_manager.calculate_position_size(balance or 10000.0, price, sl)
+                
+                if qty and qty > 0:
+                    await _live_executor.place_order(
+                        symbol=s["symbol"],
+                        side="LONG" if "BUY" in s["signal_type"] else "SHORT",
+                        qty=qty,
+                        price=price,
+                        sl=sl,
+                        tp=tp
+                    )
 
         _recent_trades = _demo_account.get_closed_trades_list(500)
         perf = _demo_account.get_performance()
