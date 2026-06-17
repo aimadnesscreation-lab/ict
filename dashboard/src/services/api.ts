@@ -127,13 +127,11 @@ export interface Candle {
 // ── Mock fallback data (used when API is unreachable) ───────────────────
 
 
-function generateMockSignals(count = 10): Signal[] {
-  // Return empty array — no fake signals on the dashboard
+function generateMockSignals(_count = 10): Signal[] {
   return [];
 }
 
-function generateMockTrades(count = 20): Trade[] {
-  // Return empty array — no fake trades on the dashboard
+function generateMockTrades(_count = 20): Trade[] {
   return [];
 }
 

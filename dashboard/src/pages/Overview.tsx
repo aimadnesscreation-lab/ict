@@ -18,7 +18,7 @@ interface DemoAccountData {
   current_drawdown_pct: number;
 }
 
-const pricePrecision = (symbol: string): number => 2;
+const pricePrecision = (_symbol: string): number => 2;
 
 const _NOW = Date.now();
 

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Search, ChevronDown, ChevronUp, Radio, Activity, X } from 'lucide-react';
 
-const pricePrecision = (symbol: string): number => 2;
+const pricePrecision = (_symbol: string): number => 2;
 
 const _NOW = Date.now();
 import { tradingApi } from '../services/api';

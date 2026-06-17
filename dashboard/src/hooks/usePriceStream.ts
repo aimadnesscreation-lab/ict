@@ -10,12 +10,22 @@ export interface PriceTick {
   timestamp: string;
 }
 
-// Dynamically determine WebSocket URL from current origin.
-// In production (same origin), this becomes wss://your-domain/ws/prices
-// In local dev, set VITE_WS_URL if needed, otherwise falls back to same origin.
-const WS_URL = import.meta.env.VITE_WS_URL ?? (
-  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/prices`
-);
+// Dynamically determine WebSocket URL.
+// Priority:
+//   1. VITE_WS_URL — explicit WebSocket URL override
+//   2. VITE_API_URL — derive WebSocket host + protocol from the API URL
+//      (e.g. http://localhost:8000 → ws://localhost:8000, https://... → wss://...)
+//   3. Same origin — works in production (Railway serves API + dashboard together)
+const WS_URL = import.meta.env.VITE_WS_URL ?? (() => {
+  const apiUrl = import.meta.env.VITE_API_URL;
+  if (apiUrl) {
+    const parsed = new URL(apiUrl);
+    const wsProto = parsed.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProto}//${parsed.host}/ws/prices`;
+  }
+  const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${wsProto}//${window.location.host}/ws/prices`;
+})();
 const RECONNECT_DELAY = 3000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 

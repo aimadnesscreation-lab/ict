@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { History as HistoryIcon, TrendingUp, TrendingDown, Activity, BarChart3, DollarSign, Percent } from 'lucide-react';
 import { tradingApi } from '../services/api';
 
-const pricePrecision = (symbol: string): number => 2;
+const pricePrecision = (_symbol: string): number => 2;
 
 const History: React.FC = () => {
   const [resultFilter, setResultFilter] = useState<string>('ALL');

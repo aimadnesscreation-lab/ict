@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { tradingApi, type OpenPosition } from '../services/api';
 
-const pricePrecision = (symbol: string): number => 2;
+const pricePrecision = (_symbol: string): number => 2;
 
 const TradeLog: React.FC = () => {
   const [resultFilter, setResultFilter] = useState<string>('ALL');
