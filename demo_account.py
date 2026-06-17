@@ -11,7 +11,7 @@ Rules:
   - Only trades signals with score ≥ 70 AND inside a kill zone (matches Discord alerts)
   - Long on BUY/STRONG_BUY, Short on SELL/STRONG_SELL
   - Max 1 open position per symbol (ignores weaker signals if already in)
-  - Account starts at $10,000
+  - Account starts at $5,000
 """
 
 from typing import Dict, List, Optional
@@ -54,7 +54,7 @@ class ClosedTrade:
 
 
 class DemoAccount:
-    def __init__(self, initial_balance: float = 10_000.0, risk_per_trade_pct: float = 1.0,
+    def __init__(self, initial_balance: float = 5_000.0, risk_per_trade_pct: float = 1.0,
                  max_daily_loss_pct: float = 3.0, max_open_positions: int = 3,
                  sl_multiplier: float = 1.5,
                  reentry_cooldown_minutes: int = 60,

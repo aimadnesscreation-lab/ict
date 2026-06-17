@@ -39,7 +39,7 @@ OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
 OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}
 BINANCE_BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
 
-BACKTEST_CAPITAL = 10_000.0
+BACKTEST_CAPITAL = 5_000.0
 
 _ict_ms = MarketStructure(n=3)
 _ict_fvg = FVGDetector()

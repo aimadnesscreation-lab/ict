@@ -40,8 +40,8 @@ OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "
 BINANCE_BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-# Default capital; override with --capital <amount> (e.g. --capital 5000)
-BACKTEST_CAPITAL = 10_000.0
+# Default capital; override with --capital <amount> (e.g. --capital 10000)
+BACKTEST_CAPITAL = 5_000.0
 MAX_OPEN_POSITIONS = 3
 
 _ict_ms = MarketStructure(n=3)
@@ -596,7 +596,7 @@ async def main():
     parser.add_argument("--parallel", action="store_true",
                         help="Run both symbols per month in parallel")
     parser.add_argument("--capital", type=float, default=None,
-                        help="Starting capital (default: 10000)")
+                        help="Starting capital (default: 5000)")
     args = parser.parse_args()
 
     logger.remove()
@@ -625,7 +625,7 @@ async def main():
         BACKTEST_CAPITAL = args.capital
 
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
-    print(f"  Both symbols: 0.5× SL, 0min cooldown, min_score=60")
+    print(f"  Both symbols: 0.5x SL, 0min cooldown, min_score=60")
     print(f"  Symbols: {', '.join(SYMBOLS)}")
     print("=" * 70 + "\n")
 
