@@ -1,9 +1,9 @@
 """
 12-Month Rolling Backtest — One Month at a Time
 
-Fetches 30 days of 5m data per month via Railway's /backtest-data endpoint
-(with optional `before` timestamp for offset windows), drives DemoAccount
-candle-by-candle matching live system logic exactly.
+Fetches 30 days of 5m data per month via OKX history API (direct, no
+intermediary server), drives DemoAccount candle-by-candle matching live
+system logic exactly.
 
 Runs months sequentially (oldest first → most recent) to avoid timeouts.
 Each month: 2 symbols (BTC, ETH), ~8640 candles each, full ICT pipeline.
@@ -34,7 +34,10 @@ from ict_engine.breaker_block import BreakerBlockDetector
 from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
 from demo_account import DemoAccount, ClosedTrade
 
-RAILWAY_URL = "https://ict-production-b1a8.up.railway.app"
+# ── OKX symbol mapping ────────────────────────────────────────────────
+OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
+OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}
+
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 # Default capital; override with --capital <amount> (e.g. --capital 5000)
 BACKTEST_CAPITAL = 10_000.0
@@ -50,9 +53,47 @@ _ict_breaker = BreakerBlockDetector()
 _signal_engine = SignalEngine()
 
 
-async def fetch_backtest_data(symbol: str, bar: str, days: int,
-                              before: Optional[str] = None) -> pl.DataFrame:
-    """Fetch paginated historical data from /backtest-data endpoint.
+async def _okx_fetch_history(symbol: str, bar: str, limit: int = 100,
+                              after: Optional[datetime] = None) -> Optional[List[Dict]]:
+    """Fetch historical candles from OKX history-candles endpoint (up to 100 per page)."""
+    inst_id = OKX_SYMBOL_MAP.get(symbol)
+    if not inst_id:
+        return None
+    url = "https://www.okx.com/api/v5/market/history-candles"
+    params = {"instId": inst_id, "bar": bar, "limit": str(min(limit, 100))}
+    if after:
+        params["after"] = str(int(after.timestamp() * 1000))
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.warning(f"[OKX] History HTTP {resp.status_code} for {symbol} {bar}")
+                return None
+            data = resp.json()
+            if data.get("code") != "0":
+                logger.warning(f"[OKX] History API error {data.get('code')} for {symbol} {bar}")
+                return None
+            candles = data.get("data", [])
+            result = []
+            for c in reversed(candles):
+                result.append({
+                    "timestamp": datetime.fromtimestamp(int(c[0]) / 1000),
+                    "open": float(c[1]), "high": float(c[2]),
+                    "low": float(c[3]), "close": float(c[4]),
+                    "volume": float(c[5]),
+                })
+            return result
+    except Exception as e:
+        logger.warning(f"[OKX] History fetch failed for {symbol} {bar}: {e}")
+        return None
+
+
+async def fetch_okx_data(symbol: str, bar: str, days: int,
+                         before: Optional[str] = None) -> pl.DataFrame:
+    """Fetch paginated historical data directly from OKX history API.
+
+    Paginates internally (100 candles per call), deduplicates, and returns
+    a sorted Polars DataFrame. No intermediary server needed.
 
     Args:
         symbol: BTCUSDT or ETHUSDT
@@ -61,42 +102,44 @@ async def fetch_backtest_data(symbol: str, bar: str, days: int,
         before: ISO date string to end the window (e.g. "2025-06-15").
                 Defaults to now.
     """
-    url = f"{RAILWAY_URL}/backtest-data/{symbol}"
-    params: Dict = {"bar": bar, "days": days}
+    per_day = OKX_BAR_CAPACITY.get(bar, 288)
+    total_needed = days * per_day
+
+    # Set pagination anchor
+    after_ts = None
     if before:
-        params["before"] = before
-    try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.warning(f"API HTTP {resp.status_code} for {symbol} {bar}")
-                return pl.DataFrame()
-            data = resp.json()
-            if not isinstance(data, list) or len(data) < 10:
-                logger.warning(f"API returned {len(data) if isinstance(data, list) else 0} candles")
-                return pl.DataFrame()
+        before_ts = before.replace("Z", "+00:00") if isinstance(before, str) else before
+        after_ts = datetime.fromisoformat(before_ts)
 
-            rows = []
-            for d in data:
-                ts = d.get("timestamp", "")
-                if isinstance(ts, str):
-                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                rows.append({
-                    "timestamp": ts,
-                    "open": float(d.get("open", 0)),
-                    "high": float(d.get("high", 0)),
-                    "low": float(d.get("low", 0)),
-                    "close": float(d.get("close", 0)),
-                    "volume": float(d.get("volume", 0)),
-                })
+    all_candles: List[Dict] = []
+    while len(all_candles) < total_needed:
+        batch = await _okx_fetch_history(symbol, bar, 100, after=after_ts)
+        if not batch:
+            break
+        all_candles.extend(batch)
+        after_ts = batch[0]["timestamp"]  # oldest candle in this batch
+        await asyncio.sleep(0.15)  # rate limit courtesy
 
-            df = pl.DataFrame(rows).sort("timestamp")
-            label = f" before {before}" if before else ""
-            logger.info(f"[API] Fetched {len(df)} {bar} candles for {symbol} ({days}d{label})")
-            return df
-    except Exception as e:
-        logger.error(f"[API] Fetch failed: {e}")
+    if not all_candles:
+        logger.warning(f"[OKX] No data returned for {symbol} {bar} ({days}d)")
         return pl.DataFrame()
+
+    # Dedup by timestamp
+    seen = set()
+    deduped = []
+    for c in all_candles:
+        key = c["timestamp"].timestamp()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    deduped.sort(key=lambda c: c["timestamp"])
+    deduped = deduped[:total_needed]
+
+    df = pl.DataFrame(deduped).sort("timestamp")
+    label = f" before {before}" if before else ""
+    logger.info(f"[OKX] Fetched {len(df)} {bar} candles for {symbol} ({days}d{label})")
+    return df
 
 
 def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
@@ -239,7 +282,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
 
     # 1. Fetch 5m data for this window
     t0 = datetime.utcnow()
-    df_5m_full = await fetch_backtest_data(symbol, "5m", days, before=before)
+    df_5m_full = await fetch_okx_data(symbol, "5m", days, before=before)
     if df_5m_full.is_empty() or len(df_5m_full) < 100:
         return {"symbol": symbol, "month": str(before or "latest"),
                 "total_trades": 0, "total_profit": 0,
@@ -251,7 +294,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 f"[fetch: {(datetime.utcnow()-t0).total_seconds():.0f}s]")
 
     # 2. Fetch 1h data for HTF bias
-    df_1h = await fetch_backtest_data(symbol, "1H", days, before=before)
+    df_1h = await fetch_okx_data(symbol, "1H", days, before=before)
     htf_bias = "neutral"
     if not df_1h.is_empty() and len(df_1h) >= 26:
         df_1h_init = df_1h.slice(0, min(168, len(df_1h)))

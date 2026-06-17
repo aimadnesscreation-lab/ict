@@ -34,7 +34,10 @@ from ict_engine.breaker_block import BreakerBlockDetector
 from signal_engine.engine import SignalEngine, determine_bias_from_ema
 from demo_account import DemoAccount, ClosedTrade
 
-RAILWAY_URL = "https://ict-production-b1a8.up.railway.app"
+# ── OKX symbol mapping ────────────────────────────────────────────────
+OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
+OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}
+
 BACKTEST_CAPITAL = 10_000.0
 
 _ict_ms = MarketStructure(n=3)
@@ -47,33 +50,76 @@ _ict_breaker = BreakerBlockDetector()
 _signal_engine = SignalEngine()
 
 
-async def fetch_data(symbol: str, bar: str, days: int = 30,
-                     before: Optional[str] = None) -> pl.DataFrame:
-    url = f"{RAILWAY_URL}/backtest-data/{symbol}"
-    params = {"bar": bar, "days": days}
+async def _okx_fetch_history(symbol: str, bar: str, limit: int = 100,
+                              after: Optional[datetime] = None) -> Optional[List[Dict]]:
+    """Fetch historical candles from OKX history-candles endpoint (up to 100 per page)."""
+    inst_id = OKX_SYMBOL_MAP.get(symbol)
+    if not inst_id:
+        return None
+    url = "https://www.okx.com/api/v5/market/history-candles"
+    params = {"instId": inst_id, "bar": bar, "limit": str(min(limit, 100))}
+    if after:
+        params["after"] = str(int(after.timestamp() * 1000))
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("code") != "0":
+                return None
+            candles = data.get("data", [])
+            result = []
+            for c in reversed(candles):
+                result.append({
+                    "timestamp": datetime.fromtimestamp(int(c[0]) / 1000),
+                    "open": float(c[1]), "high": float(c[2]),
+                    "low": float(c[3]), "close": float(c[4]),
+                    "volume": float(c[5]),
+                })
+            return result
+    except Exception:
+        return None
+
+
+async def fetch_okx_data(symbol: str, bar: str, days: int = 30,
+                          before: Optional[str] = None) -> pl.DataFrame:
+    """Fetch paginated historical data directly from OKX history API.
+
+    Paginates internally (100 candles per call), deduplicates, and returns
+    a sorted Polars DataFrame. No intermediary server needed.
+    """
+    per_day = OKX_BAR_CAPACITY.get(bar, 288)
+    total_needed = days * per_day
+
+    after_ts = None
     if before:
-        params["before"] = before
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        resp = await client.get(url, params=params)
-        if resp.status_code != 200:
-            return pl.DataFrame()
-        data = resp.json()
-        if not isinstance(data, list) or len(data) < 10:
-            return pl.DataFrame()
-        rows = []
-        for d in data:
-            ts = d.get("timestamp", "")
-            if isinstance(ts, str):
-                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            rows.append({
-                "timestamp": ts,
-                "open": float(d.get("open", 0)),
-                "high": float(d.get("high", 0)),
-                "low": float(d.get("low", 0)),
-                "close": float(d.get("close", 0)),
-                "volume": float(d.get("volume", 0)),
-            })
-        return pl.DataFrame(rows).sort("timestamp")
+        before_ts = before.replace("Z", "+00:00") if isinstance(before, str) else before
+        after_ts = datetime.fromisoformat(before_ts)
+
+    all_candles: List[Dict] = []
+    while len(all_candles) < total_needed:
+        batch = await _okx_fetch_history(symbol, bar, 100, after=after_ts)
+        if not batch:
+            break
+        all_candles.extend(batch)
+        after_ts = batch[0]["timestamp"]
+        await asyncio.sleep(0.15)
+
+    if not all_candles:
+        return pl.DataFrame()
+
+    seen = set()
+    deduped = []
+    for c in all_candles:
+        key = c["timestamp"].timestamp()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c)
+
+    deduped.sort(key=lambda c: c["timestamp"])
+    deduped = deduped[:total_needed]
+    return pl.DataFrame(deduped).sort("timestamp")
 
 
 def run_ict_on_buffer(buffer: pl.DataFrame, htf_bias: str, current_price: float,
@@ -137,11 +183,11 @@ async def debug_backtest_symbol(symbol: str, before: Optional[str] = None) -> Di
     logger.info(f"{'='*60}")
 
     t0 = datetime.utcnow()
-    df_5m = await fetch_data(symbol, "5m", 30, before=before)
+    df_5m = await fetch_okx_data(symbol, "5m", 30, before=before)
     if df_5m.is_empty() or len(df_5m) < 100:
         return {"symbol": symbol, "error": f"Only {len(df_5m)} candles"}
 
-    df_1h = await fetch_data(symbol, "1H", 30, before=before)
+    df_1h = await fetch_okx_data(symbol, "1H", 30, before=before)
 
     htf_bias = "neutral"
     if not df_1h.is_empty() and len(df_1h) >= 26:

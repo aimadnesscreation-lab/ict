@@ -166,13 +166,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Institutional Trading Intelligence Platform API", lifespan=lifespan)
 
-# CORS — allow the Vite dev server and Railway domain to talk to the API
+# CORS — allow the Vite dev server to talk to the API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://ict-production-b1a8.up.railway.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
