@@ -151,7 +151,6 @@ async def lifespan(app: FastAPI):
         logger.info("Exchange sync worker not started — no exchange credentials.")
 
     # Health tracking
-    _health["data_sources"] = ["OKX (crypto, 15s poll)"]
     _health["status"] = "running"
 
     logger.info(f"Started {len(_background_tasks)} background workers.")
@@ -195,10 +194,11 @@ def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
 
 
 async def _backfill_crypto_buffers():
-    """Backfill 5m buffers from OKX on startup, resample 15m."""
+    """Backfill 5m buffers on startup, resample 15m.
+    Tries OKX first, falls back to Binance REST."""
     global _candle_buffers
     for symbol in BINANCE_SYMBOLS:
-        candles = await _okx_fetch_candles(symbol, "5m", 288)
+        candles = await _fetch_candles(symbol, "5m", 288)
         if candles:
             buf = [{"timestamp": c["timestamp"], "open": c["open"], "high": c["high"],
                     "low": c["low"], "close": c["close"], "volume": c["volume"]}
@@ -211,9 +211,10 @@ async def _backfill_crypto_buffers():
                       "low": r["low"], "close": r["close"], "volume": r["volume"]}
                      for r in df_15m.to_dicts()]
             _candle_buffers[symbol]["15m"] = buf15
-            logger.info(f"[Crypto] Backfilled {len(buf)} 5m + {len(buf15)} 15m for {symbol}")
+            status = _active_data_source.upper()
+            logger.info(f"[Crypto] Backfilled {len(buf)} 5m + {len(buf15)} 15m for {symbol} ({status})")
         else:
-            logger.warning(f"[Crypto] OKX backfill failed for {symbol}, starting empty")
+            logger.warning(f"[Crypto] Data backfill failed for {symbol}, starting empty")
             _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
             _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
 
@@ -416,11 +417,16 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
 OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
 
 
+# ── Dual data source: OKX (works on Railway) + Binance (works locally) ──
+_active_data_source = "unknown"
+
+
 async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
     """Fetch OHLCV candles from OKX REST API.
 
     OKX returns candles with a 'confirm' field: "0" = still forming, "1" = closed.
     Returns newest-first, we reverse to oldest-first. No API key needed for public data.
+    Works from Railway but may be blocked on some local networks.
     """
     inst_id = OKX_SYMBOL_MAP.get(symbol)
     if not inst_id:
@@ -431,13 +437,12 @@ async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optiona
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url, params=params)
             if resp.status_code != 200:
-                logger.warning(f"[OKX] HTTP {resp.status_code} for {symbol} {bar}")
+                logger.debug(f"[OKX] HTTP {resp.status_code} for {symbol} {bar}")
                 return None
             data = resp.json()
             if data.get("code") != "0":
                 return None
             candles = data.get("data", [])
-            # Reverse: OKX returns newest-first, we want oldest-first
             result = []
             for c in reversed(candles):
                 result.append({
@@ -451,8 +456,78 @@ async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optiona
                 })
             return result
     except Exception as e:
-        logger.warning(f"[OKX] Fetch failed for {symbol} {bar}: {e}")
+        logger.debug(f"[OKX] Fetch failed for {symbol} {bar}: {e}")
         return None
+
+
+# Binance REST interval mapping (same as OKX labels but Binance uses lowercase)
+BINANCE_BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
+
+
+async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
+    """Fetch OHLCV candles from Binance public REST API.
+
+    Binance returns klines with open/close/high/low/volume.
+    No API key needed for public data. Returns oldest-first.
+    Works on local networks where OKX may be blocked.
+    """
+    interval = BINANCE_BAR_MAP.get(bar)
+    if not interval:
+        return None
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": interval, "limit": str(limit)}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                logger.debug(f"[Binance] HTTP {resp.status_code} for {symbol} {bar}")
+                return None
+            klines = resp.json()
+            if not isinstance(klines, list) or len(klines) == 0:
+                return None
+            # Binance returns oldest-first, which is what we want
+            result = []
+            for k in klines:
+                result.append({
+                    "timestamp": datetime.fromtimestamp(int(k[0]) / 1000),
+                    "open": float(k[1]),
+                    "high": float(k[2]),
+                    "low": float(k[3]),
+                    "close": float(k[4]),
+                    "volume": float(k[5]),
+                    "confirmed": True,  # Binance klines are always closed candles
+                })
+            return result
+    except Exception as e:
+        logger.debug(f"[Binance] Fetch failed for {symbol} {bar}: {e}")
+        return None
+
+
+async def _fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
+    """Fetch OHLCV candles from any available source.
+
+    Tries OKX first (works on Railway), falls back to Binance (works locally).
+    Updates _active_data_source for health tracking.
+    """
+    global _active_data_source
+    candles = await _okx_fetch_candles(symbol, bar, limit)
+    if candles:
+        if _active_data_source != "okx":
+            logger.info(f"[Data] Using OKX (symbol={symbol} bar={bar})")
+            _active_data_source = "okx"
+            _health["data_sources"] = ["OKX (REST, 15s poll)"]
+        return candles
+
+    candles = await _binance_fetch_candles(symbol, bar, limit)
+    if candles:
+        if _active_data_source != "binance":
+            logger.info(f"[Data] Using Binance REST (symbol={symbol} bar={bar})")
+            _active_data_source = "binance"
+            _health["data_sources"] = ["Binance (REST, 15s poll)"]
+        return candles
+
+    logger.warning(f"[Data] Both OKX and Binance failed for {symbol} {bar}")
+    return None
 
 
 async def _crypto_data_worker():
@@ -464,6 +539,9 @@ async def _crypto_data_worker():
 
     await _backfill_crypto_buffers()
     _last_ts: Dict[str, datetime] = {}  # track last confirmed candle timestamp
+
+    # Log which data source is working
+    logger.info(f"[Data] Active source: {_active_data_source}")
 
     # Background Binance WS attempt (may or may not work from cloud IPs)
     BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
@@ -521,9 +599,9 @@ async def _crypto_data_worker():
             await asyncio.sleep(15)
 
             for symbol in BINANCE_SYMBOLS:
-                candles = await _okx_fetch_candles(symbol, "5m", 288)
+                candles = await _fetch_candles(symbol, "5m", 288)
                 if not candles:
-                    logger.warning(f"[Crypto] OKX fetch failed for {symbol}, skipping...")
+                    logger.warning(f"[Crypto] Data fetch failed for {symbol}, skipping...")
                     continue
 
                 # Reverse so newest is last
@@ -571,14 +649,14 @@ async def _crypto_data_worker():
 
 async def _htf_bias_worker():
     """
-    Periodically fetches 1h data from OKX and updates HTF bias via EMA.
+    Periodically fetches 1h data (OKX → Binance fallback) and updates HTF bias via EMA.
     Runs every 15 minutes. The crypto data worker reads _health["htf_bias"].
     """
     global _health
 
     while True:
         try:
-            candles = await _okx_fetch_candles("BTCUSDT", "1H", 168)
+            candles = await _fetch_candles("BTCUSDT", "1H", 168)
             if candles and len(candles) >= 26:
                 df_htf = pl.DataFrame(candles)
                 htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
@@ -612,7 +690,7 @@ async def root():
     return {
         "status": "online",
         "version": "0.1.0",
-        "data_source": "OKX (crypto, 15s poll)",
+        "data_source": _active_data_source.upper() + " (auto-fallback OKX ↔ Binance)",
     }
 
 
@@ -703,7 +781,7 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
     try:
         tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
         bar = tf_map.get(timeframe, "1H")
-        candles = await _okx_fetch_candles(symbol, bar, limit)
+        candles = await _fetch_candles(symbol, bar, limit)
 
         if not candles:
             return []
