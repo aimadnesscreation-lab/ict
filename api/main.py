@@ -1072,6 +1072,61 @@ async def get_health():
     }
 
 
+# ─── Reset (clear all state for a fresh start) ────────────────────────
+
+@app.post("/reset")
+async def reset_all():
+    """
+    Reset DemoAccount, caches, signals, and trades to start completely fresh.
+    Use this when you want to clear all accumulated history and begin anew.
+    
+    The data pipeline continues running — new signals will generate new trades
+    from this point forward. No old data will appear on the dashboard.
+    """
+    global _signal_id_counter, _recent_signals, _recent_trades, _performance_cache
+
+    # Reset DemoAccount to initial state
+    _demo_account.open_positions.clear()
+    _demo_account.closed_trades.clear()
+    _demo_account.balance = DEMO_INITIAL_BALANCE
+    _demo_account.equity = DEMO_INITIAL_BALANCE
+    _demo_account._peak_balance = DEMO_INITIAL_BALANCE
+    _demo_account._daily_pnl = 0.0
+    _demo_account._last_sl.clear()
+    _demo_account._last_trade_date = datetime.utcnow().date()
+
+    # Reset all caches
+    _signal_id_counter = 0
+    _recent_signals = []
+    _recent_trades = []
+    _performance_cache = {}
+
+    # Reset health counters (keep status, bias, data_source)
+    _health["total_signals_generated"] = 0
+    _health["total_signals_kept"] = 0
+    _health["total_trades_executed"] = 0
+    _health["last_cycle_time"] = None
+    _health["sync_stats"] = {
+        "total_cycles": 0,
+        "total_closed_from_sl": 0,
+        "total_closed_from_tp": 0,
+        "total_closed_from_manual": 0,
+        "total_errors": 0,
+        "last_sync_time": None,
+        "last_sync_result": None,
+    }
+
+    logger.info("[Reset] All state cleared — fresh start.")
+
+    return {
+        "status": "ok",
+        "message": "All state cleared. DemoAccount reset to $%.2f with 0 trades." % DEMO_INITIAL_BALANCE,
+        "demo_balance": DEMO_INITIAL_BALANCE,
+        "demo_open_positions": 0,
+        "demo_closed_trades": 0,
+    }
+
+
 # ─── Sync (exchange position reconciliation) ───────────────────────
 
 @app.post("/sync")
