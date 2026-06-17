@@ -38,6 +38,12 @@ def normalize_symbol(symbol: str) -> str:
     return f"{base}/USDT:USDT"
 
 
+def denormalize_symbol(market_symbol: str) -> str:
+    """Convert CCXT unified symbol back to raw format (e.g. BTC/USDT:USDT → BTCUSDT)."""
+    base = market_symbol.split("/")[0]
+    return f"{base}USDT"
+
+
 class LiveExecutor:
     """
     Generic Live Execution Engine.
@@ -49,10 +55,11 @@ class LiveExecutor:
       - amount precision: BTC=0.0001, ETH=0.001
     """
 
-    def __init__(self, mode: str = "demo"):
+    def __init__(self, mode: str = "demo", leverage: int = 10):
         self.mode = mode.lower()
         self.exchange_name = os.getenv("EXCHANGE_NAME", "binance").lower()
         self._markets_loaded = False
+        self.leverage = leverage
 
         # Load credentials based on exchange
         if self.exchange_name == "binance":
@@ -113,6 +120,29 @@ class LiveExecutor:
             self._markets_loaded = True
         except Exception as e:
             logger.warning(f"Execution: Failed to load markets: {e}")
+
+    async def _set_leverage(self, symbol: str):
+        """
+        Set leverage for a specific symbol on Binance futures.
+        Must be called after _ensure_markets() so exchange is ready.
+        Uses cross-margin mode by default.
+        """
+        if not self.exchange or not self._markets_loaded:
+            return
+        try:
+            market_symbol = normalize_symbol(symbol)
+            if self.exchange_name == "binance":
+                await self.exchange.set_leverage(self.leverage, market_symbol)
+                # Also set margin mode to cross
+                try:
+                    await self.exchange.set_margin_mode('cross', market_symbol)
+                except Exception:
+                    pass  # May already be cross, ignore
+            else:
+                await self.exchange.set_leverage(self.leverage, market_symbol)
+            logger.info(f"Execution: Leverage set to {self.leverage}x ({'cross'}) for {market_symbol}")
+        except Exception as e:
+            logger.warning(f"Execution: Failed to set leverage for {symbol}: {e}")
 
     def _get_market_precision(self, symbol: str) -> Tuple[float, float, float]:
         """Get amount precision, min amount, and max amount for a symbol.
@@ -247,6 +277,9 @@ class LiveExecutor:
 
         # Ensure markets are loaded for precision/limits
         await self._ensure_markets()
+
+        # Set the configured leverage for this symbol before placing orders
+        await self._set_leverage(symbol)
 
         # Convert to CCXT unified symbol
         market_symbol = normalize_symbol(symbol)

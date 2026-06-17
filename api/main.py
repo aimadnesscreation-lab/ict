@@ -30,6 +30,7 @@ from discord.bot import DiscordBot
 from demo_account import DemoAccount
 from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
 from execution.executor import LiveExecutor
+from execution.sync_worker import sync_worker, sync_positions
 
 # ── App state ─────────────────────────────────────────────────────────
 _signal_id_counter = 0
@@ -50,6 +51,15 @@ _health: Dict = {
     "total_trades_executed": 0,
     "started_at": datetime.utcnow().isoformat() + "Z",
     "data_sources": [],
+    "sync_stats": {
+        "total_cycles": 0,
+        "total_closed_from_sl": 0,
+        "total_closed_from_tp": 0,
+        "total_closed_from_manual": 0,
+        "total_errors": 0,
+        "last_sync_time": None,
+        "last_sync_result": None,
+    },
 }
 
 risk_manager = RiskManager(
@@ -67,8 +77,10 @@ _ict_sessions = SessionDetector()
 _ict_pd = PremiumDiscountDetector()
 _ict_breaker = BreakerBlockDetector()
 _signal_engine = SignalEngine()
+DEMO_INITIAL_BALANCE = float(os.getenv("DEMO_INITIAL_BALANCE", "5000"))
+
 _demo_account = DemoAccount(
-    initial_balance=10_000.0, risk_per_trade_pct=1.0,
+    initial_balance=DEMO_INITIAL_BALANCE, risk_per_trade_pct=1.0,
     max_daily_loss_pct=risk_manager.max_daily_loss_pct,
     max_open_positions=risk_manager.max_open_positions,
     sl_multiplier=1.5,
@@ -77,7 +89,10 @@ _demo_account = DemoAccount(
     symbol_min_scores={"BTCUSDT": 60, "ETHUSDT": 60},
 )
 
-_live_executor = LiveExecutor(mode=os.getenv("EXCHANGE_MODE", "demo"))
+_live_executor = LiveExecutor(
+    mode=os.getenv("EXCHANGE_MODE", "demo"),
+    leverage=int(os.getenv("LEVERAGE", "10")),
+)
 
 # ── Binance crypto data ──────────────────────────────────────────────
 BINANCE_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -118,6 +133,22 @@ async def lifespan(app: FastAPI):
     bias_task = asyncio.create_task(_htf_bias_worker())
     _background_tasks.append(bias_task)
     logger.info("HTF bias worker scheduled (OKX 1h, 15min cycle).")
+
+    # Start exchange sync worker (reconciles DemoAccount ↔ Binance every 30s)
+    if _live_executor and _live_executor.exchange:
+        sync_task = asyncio.create_task(
+            sync_worker(
+                demo_account=_demo_account,
+                live_executor=_live_executor,
+                latest_prices=_latest_prices,
+                health_dict=_health,
+                interval=30,
+            )
+        )
+        _background_tasks.append(sync_task)
+        logger.info("Exchange sync worker scheduled (30s cycle).")
+    else:
+        logger.info("Exchange sync worker not started — no exchange credentials.")
 
     # Health tracking
     _health["data_sources"] = ["OKX (crypto, 15s poll)"]
@@ -897,10 +928,12 @@ async def get_demo_account():
     # the latest performance cache + open positions from the global state.
     # Since _performance_cache is updated by the demo account each cycle, we
     # can enrich it with the account balance and open positions info.
+    initial_balance = _demo_account.initial_balance
+    balance = _performance_cache.get("capital_remaining", initial_balance) if _performance_cache else initial_balance
+    peak = _performance_cache.get("peak_balance", initial_balance) if _performance_cache else initial_balance
     summary = {
-        "balance": _performance_cache.get("capital_remaining", 10000.0)
-            if _performance_cache else 10000.0,
-        "initial_balance": 10000.0,
+        "balance": balance,
+        "initial_balance": initial_balance,
         "total_profit": _performance_cache.get("total_profit", 0.0)
             if _performance_cache else 0.0,
         "total_trades": _performance_cache.get("total_trades", 0)
@@ -917,8 +950,7 @@ async def get_demo_account():
             if _performance_cache else 0,
         "total_losses": _performance_cache.get("total_losses", 0)
             if _performance_cache else 0,
-        "peak_balance": _performance_cache.get("peak_balance", 10000.0)
-            if _performance_cache else 10000.0,
+        "peak_balance": peak,
         "current_drawdown_pct": _performance_cache.get("current_drawdown_pct", 0.0)
             if _performance_cache else 0.0,
         "open_positions_count": _performance_cache.get("open_positions_count", 0)
@@ -962,11 +994,46 @@ async def get_health():
     }
 
 
+# ─── Sync (exchange position reconciliation) ───────────────────────
+
+@app.post("/sync")
+async def trigger_sync():
+    """
+    Manually trigger exchange position sync.
+    Reconciles DemoAccount with actual Binance exchange positions.
+    Useful after manual intervention or connection recovery.
+    """
+    if not _live_executor or not _live_executor.exchange:
+        raise HTTPException(status_code=503, detail="No exchange connection available")
+
+    try:
+        result = await sync_positions(
+            demo_account=_demo_account,
+            live_executor=_live_executor,
+            latest_prices=_latest_prices,
+        )
+        return {
+            "status": "ok",
+            "timestamp": result.timestamp.isoformat(),
+            "demo_positions_checked": result.demo_positions_checked,
+            "exchange_positions_checked": result.exchange_positions_checked,
+            "positions_closed_sl": result.positions_closed_from_exchange_sl,
+            "positions_closed_tp": result.positions_closed_from_exchange_tp,
+            "positions_closed_manual": result.positions_closed_from_exchange_manual,
+            "positions_mirrored": result.positions_mirrored,
+            "discrepancies": result.discrepancies,
+            "errors": result.errors,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync failed: {e}")
+
+
 # ─── Risk (real, from RiskManager) ───────────────────────────────────
 
 @app.get("/risk/status")
 async def get_risk_status():
     """Return current risk management state."""
+    demo_balance = _demo_account.balance if hasattr(_demo_account, 'balance') else DEMO_INITIAL_BALANCE
     return {
         "max_risk_per_trade_pct": risk_manager.max_risk_per_trade_pct,
         "max_daily_loss_pct": risk_manager.max_daily_loss_pct,
@@ -974,13 +1041,13 @@ async def get_risk_status():
         "max_open_positions": risk_manager.max_open_positions,
         "current_daily_loss_pct": round(
             risk_manager.current_daily_loss
-            / (10000 * risk_manager.max_daily_loss_pct / 100)
+            / (DEMO_INITIAL_BALANCE * risk_manager.max_daily_loss_pct / 100)
             * risk_manager.max_daily_loss_pct
             if risk_manager.max_daily_loss_pct > 0 else 0, 2
         ),
         "current_weekly_loss_pct": 0.0,
         "open_positions_count": risk_manager.open_positions_count,
-        "account_balance": 10000.0,
+        "account_balance": demo_balance,
     }
 
 
