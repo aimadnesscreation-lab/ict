@@ -305,42 +305,38 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
                 s["price"] = live
 
         # Process in the built-in simulator (DemoAccount)
+        # DemoAccount handles: min_score threshold, kill zone, HTF alignment, cooldown, daily loss limit
         _demo_account.process_signals(all_signals, current_prices)
 
         # ─── Live / Exchange Demo Execution ───
-        # This part handles real API calls to OKX
-        for s in all_signals:
-            if s.get("score", 0) >= 80 and s.get("in_kill_zone", False) and s.get("htf_aligned", True):
-                # Only execute if a position is not already open for this symbol on the exchange
-                # (You'd ideally check _live_executor.get_open_positions() here)
-                
-                # Calculate SL/TP levels based on signal ATR
-                atr = s.get("atr", 0)
-                price = s.get("price", 0)
-                sl_mult = 0.5 # Same as backtest
-                sl_dist = atr * sl_mult
-                tp_dist = sl_dist * 2.0
-                
-                if "BUY" in s["signal_type"]:
-                    sl = price - sl_dist
-                    tp = price + tp_dist
-                else:
-                    sl = price + sl_dist
-                    tp = price - tp_dist
-                
-                # Risk 1% of exchange balance
-                balance = await _live_executor.get_balance()
-                qty = risk_manager.calculate_position_size(balance or 10000.0, price, sl)
-                
-                if qty and qty > 0:
-                    await _live_executor.place_order(
-                        symbol=s["symbol"],
-                        side="LONG" if "BUY" in s["signal_type"] else "SHORT",
-                        qty=qty,
-                        price=price,
-                        sl=sl,
-                        tp=tp
-                    )
+        # Mirror DemoAccount decisions on the exchange.
+        # Instead of reimplementing all the signal conditions here, we mirror whatever
+        # DemoAccount opened — this guarantees identical conditions between dashboard
+        # and exchange execution (same min_score=60, same 0.5x ATR SL, same 1:2 RR).
+        # Exchange position dedup is handled by checking has_position() before opening.
+        if _live_executor and _live_executor.exchange:
+            try:
+                # Get exchange USDT balance for position sizing
+                exchange_balance = await _live_executor.get_balance()
+                if exchange_balance > 0:
+                    for symbol, pos in list(_demo_account.open_positions.items()):
+                        # Skip if already have a position on the exchange for this symbol
+                        if await _live_executor.has_position(symbol):
+                            logger.info(f"[LiveExec] {symbol} position already on exchange, skipping")
+                            continue
+
+                        # Use the same SL/TP as DemoAccount's position
+                        await _live_executor.place_order(
+                            symbol=symbol,
+                            side=pos.side,
+                            qty=pos.quantity,
+                            price=pos.entry_price,
+                            sl=pos.stop_loss,
+                            tp=pos.take_profit,
+                        )
+                        _health["total_trades_executed"] = _health.get("total_trades_executed", 0) + 1
+            except Exception as e:
+                logger.warning(f"[LiveExec] Failed to mirror positions: {e}")
 
         _recent_trades = _demo_account.get_closed_trades_list(500)
         perf = _demo_account.get_performance()
