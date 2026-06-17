@@ -126,131 +126,26 @@ export interface Candle {
 
 // ── Mock fallback data (used when API is unreachable) ───────────────────
 
+
 function generateMockSignals(count = 10): Signal[] {
-  const symbols = ['BTCUSDT', 'ETHUSDT'];
-  const types: Signal['signal_type'][] = ['STRONG_BUY', 'BUY', 'NEUTRAL', 'SELL', 'STRONG_SELL'];
-  const weights = [15, 25, 20, 25, 15];
-  const basePrices: Record<string, number> = {
-    BTCUSDT: 68420, ETHUSDT: 3520,
-  };
-
-  const weightedPick = () => {
-    const total = weights.reduce((a, b) => a + b, 0);
-    let r = Math.random() * total;
-    for (let i = 0; i < types.length; i++) {
-      r -= weights[i];
-      if (r <= 0) return types[i];
-    }
-    return 'NEUTRAL' as Signal['signal_type'];
-  };
-
-  return Array.from({ length: count }, (_, i) => {
-    const sym = symbols[Math.floor(Math.random() * symbols.length)];
-    const bp = basePrices[sym] || 100;
-    const score = Math.floor(Math.random() * 85) + 10;
-    const bias = (['bullish', 'bearish', 'neutral'] as const)[Math.floor(Math.random() * 3)];
-    const isBullish = Math.random() > 0.5;
-    const bullScore = isBullish ? score : Math.floor(Math.random() * 30);
-    const bearScore = isBullish ? Math.floor(Math.random() * 30) : score;
-    return {
-      id: i + 1,
-      symbol: sym,
-      signal_type: weightedPick(),
-      score,
-      bullish_score: bullScore,
-      bearish_score: bearScore,
-      net_score: bullScore - bearScore,
-      price: Math.round((bp + (Math.random() - 0.5) * 10) * 10000) / 10000,
-      timestamp: new Date(Date.now() - Math.random() * 86400000).toISOString(),
-      confidence: Math.round((Math.random() * 0.48 + 0.5) * 100) / 100,
-      timeframe: ['5m', '15m', '1h'][Math.floor(Math.random() * 3)],
-      bias,
-      meta_data: {
-        mss: Math.random() > 0.4,
-        mss_type: Math.random() > 0.5 ? (Math.random() > 0.5 ? 'BULLISH_MSS' : 'BEARISH_MSS') : null,
-        sweep: Math.random() > 0.5,
-        sweep_type: Math.random() > 0.5 ? (Math.random() > 0.5 ? 'BULLISH' : 'BEARISH') : null,
-        bullish_fvg: Math.random() > 0.6,
-        bearish_fvg: Math.random() > 0.7,
-        bullish_ob: Math.random() > 0.65,
-        bearish_ob: Math.random() > 0.7,
-        fvg: Math.random() > 0.3,
-        ob: Math.random() > 0.5,
-        discount: Math.random() > 0.5,
-        ote: Math.random() > 0.6,
-        bias: bias,
-        in_kill_zone: Math.random() > 0.6,
-        htf_bias: bias,
-        htf_aligned: true,
-        active_sessions: ['london', 'new_york'].filter(() => Math.random() > 0.5),
-        active_kill_zones: ['london_kill_zone'].filter(() => Math.random() > 0.7),
-      },
-    };
-  });
+  // Return empty array — no fake signals on the dashboard
+  return [];
 }
 
 function generateMockTrades(count = 20): Trade[] {
-  const symbols = ['BTCUSDT', 'ETHUSDT'];
-  const results: Trade['result'][] = ['WIN', 'WIN', 'WIN', 'LOSS', 'LOSS', 'BREAK_EVEN'];
-  const basePrices: Record<string, number> = {
-    BTCUSDT: 68000, ETHUSDT: 3500,
-  };
-
-  return Array.from({ length: count }, (_, i) => {
-    const sym = symbols[Math.floor(Math.random() * symbols.length)];
-    const bp = basePrices[sym];
-    const entry = Math.round((bp + (Math.random() - 0.5) * bp * 0.02) * 10000) / 10000;
-    const result = results[Math.floor(Math.random() * results.length)];
-    const isLong = Math.random() > 0.5;
-    const rr = Math.round((Math.random() * 3 + 0.5) * 100) / 100;
-
-    let profit: number;
-    if (result === 'WIN') {
-      profit = Math.round(entry * (Math.random() * 0.02 + 0.005) * 100) / 100;
-    } else if (result === 'LOSS') {
-      profit = -Math.round(entry * (Math.random() * 0.01 + 0.005) * 100) / 100;
-    } else {
-      profit = 0;
-    }
-
-    const entryTime = new Date(Date.now() - Math.random() * 604800000);
-    const exitTime = new Date(entryTime.getTime() + Math.random() * 86400000);
-
-    return {
-      id: i + 1,
-      symbol: sym,
-      signal_type: isLong ? 'BUY' : 'SELL',
-      entry_time: entryTime.toISOString(),
-      exit_time: exitTime.toISOString(),
-      entry_price: entry,
-      exit_price: Math.round((entry + profit) * 10000) / 10000,
-      profit: Math.round(profit * 100) / 100,
-      rr: result === 'BREAK_EVEN' ? 0 : rr,
-      result,
-      exit_reason: result === 'WIN' ? 'TAKE_PROFIT' : result === 'LOSS' ? 'STOP_LOSS' : 'MANUAL',
-    };
-  }).sort((a, b) => new Date(b.exit_time).getTime() - new Date(a.exit_time).getTime());
+  // Return empty array — no fake trades on the dashboard
+  return [];
 }
 
 function generateMockPerformance(): PerformanceMetrics {
-  const trades = generateMockTrades(50);
-  const wins = trades.filter(t => t.result === 'WIN');
-  const losses = trades.filter(t => t.result === 'LOSS');
-  const totalPnl = trades.reduce((s, t) => s + t.profit, 0);
-  const grossProfits = wins.reduce((s, t) => s + t.profit, 0);
-  const grossLosses = Math.abs(losses.reduce((s, t) => s + t.profit, 0));
-  const winRate = trades.length ? wins.length / trades.length : 0;
-  const avgRr = trades.length ? trades.reduce((s, t) => s + t.rr, 0) / trades.length : 0;
-  const avgReturn = trades.length ? trades.reduce((s, t) => s + t.profit / t.entry_price, 0) / trades.length : 0;
-
   return {
-    win_rate: Math.round(winRate * 10000) / 10000,
-    total_pnl: Math.round(totalPnl * 100) / 100,
-    profit_factor: grossLosses > 0 ? Math.round((grossProfits / grossLosses) * 100) / 100 : grossProfits > 0 ? 999 : 0,
-    max_drawdown: Math.round(Math.random() * 0.05 * 10000) / 10000,
-    sharpe_ratio: Math.round((avgReturn / 0.01) * Math.sqrt(252) * 100) / 100,
-    total_trades: trades.length,
-    avg_rr: Math.round(avgRr * 100) / 100,
+    win_rate: 0,
+    total_pnl: 0,
+    profit_factor: 0,
+    max_drawdown: 0,
+    sharpe_ratio: 0,
+    total_trades: 0,
+    avg_rr: 0,
   };
 }
 
@@ -260,10 +155,10 @@ function generateMockRiskStatus(): RiskStatus {
     max_daily_loss_pct: 3.0,
     max_weekly_loss_pct: 6.0,
     max_open_positions: 3,
-    current_daily_loss_pct: 0.4,
-    current_weekly_loss_pct: 1.2,
-    open_positions_count: 1,
-    account_balance: 10000.0,
+    current_daily_loss_pct: 0.0,
+    current_weekly_loss_pct: 0.0,
+    open_positions_count: 0,
+    account_balance: 5000.0,
   };
 }
 
@@ -273,7 +168,10 @@ async function safeRequest<T>(fn: () => Promise<T>, fallback: T, label: string):
   try {
     return await fn();
   } catch {
-    console.warn(`API unreachable for "${label}", using fallback data`);
+    const apiUrl = import.meta.env.VITE_API_URL || '(same origin — Vite default)';
+    console.warn(`[API] "${label}" failed (trying ${apiUrl}). Showing empty state.`);
+    console.warn(`[API] Fix: run the dashboard with: VITE_API_URL=http://localhost:8000 npm run dev`);
+    console.warn(`[API] Or access the dashboard at http://localhost:8000/dashboard (no env var needed)`);
     return fallback;
   }
 }
@@ -289,13 +187,13 @@ export const tradingApi = {
       'getSignals',
     ),
 
-  getSignalDetail: (signalId: number): Promise<Signal> =>
+  getSignalDetail: (signalId: number): Promise<Signal | null> =>
     safeRequest(
       async () => {
         const res = await api.get(`/signals/${signalId}`);
         return res.data;
       },
-      generateMockSignals(50).find(s => s.id === signalId) ?? generateMockSignals(1)[0],
+      null,
       'getSignalDetail',
     ),
 
@@ -339,8 +237,8 @@ export const tradingApi = {
         return res.data;
       },
       {
-        balance: 10000,
-        initial_balance: 10000,
+        balance: 5000,
+        initial_balance: 5000,
         total_profit: 0,
         total_trades: 0,
         win_rate: 0,
@@ -349,7 +247,7 @@ export const tradingApi = {
         avg_rr: 0,
         total_wins: 0,
         total_losses: 0,
-        peak_balance: 10000,
+        peak_balance: 5000,
         current_drawdown_pct: 0,
         open_positions_count: 0,
         open_positions: [],

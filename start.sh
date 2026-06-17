@@ -179,10 +179,10 @@ fi
 if [ -d "dashboard" ]; then
     info "Starting dashboard (Vite dev server)..."
     cd dashboard
-    npm run dev &
+    VITE_API_URL=http://localhost:8000 npm run dev &
     DASHBOARD_PID=$!
     cd "$SCRIPT_DIR"
-    ok "Dashboard starting at http://localhost:5173"
+    ok "Dashboard starting at http://localhost:5173 (→ API at http://localhost:8000)"
 fi
 
 # ── Summary ──────────────────────────────────────────────────
