@@ -335,9 +335,22 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
                 s["trigger_price"] = s["price"]
                 s["price"] = live
 
+        # ── Spot mode filter ────────────────────────────────────────────
+        # Binance Spot only supports LONG positions. SHORT signals accepted by
+        # DemoAccount would be rejected by LiveExecutor (place_order skips
+        # SHORT), causing a permanent desync between demo and exchange.
+        # Filter SHORT signals here so DemoAccount never opens phantom positions.
+        if _live_executor and _live_executor.exchange:
+            before = len(all_signals)
+            all_signals = [s for s in all_signals if not s.get("signal_type", "").startswith("SELL")]
+            filtered = before - len(all_signals)
+            if filtered:
+                logger.info(f"[Spot] Filtered {filtered} SHORT signal(s) — spot only supports LONG")
+
         # Process in the built-in simulator (DemoAccount)
         # DemoAccount handles: min_score threshold, kill zone, HTF alignment, cooldown, daily loss limit
-        _demo_account.process_signals(all_signals, current_prices)
+        if all_signals:
+            _demo_account.process_signals(all_signals, current_prices)
 
         # ─── Live / Exchange Demo Execution ───
         # Mirror DemoAccount decisions on the exchange.
