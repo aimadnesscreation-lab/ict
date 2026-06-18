@@ -1,63 +1,71 @@
-# Institutional AI Trading Intelligence Platform
+# ICT Trading Intelligence Platform
 
-A production-ready algorithmic trading platform built on **ICT (Inner Circle Trader)** concepts — a mathematical framework for market structure analysis. The system processes real-time OHLCV data through a 7-module ICT pipeline, scores confluences with a dual-scoring signal engine, manages a forward-testing demo account, mirrors trades onto Binance Spot (LONG only), and surfaces everything through a React dashboard and Discord webhook alerts.
+A production-ready algorithmic trading platform built on **ICT (Inner Circle Trader)** concepts — a mathematical framework for market structure analysis. The system processes real-time Binance OHLCV data through a 7-module ICT pipeline, scores confluences with a dual-scoring signal engine, manages a forward-testing demo account, mirrors trades onto Binance Spot (LONG only), and surfaces everything through a React dashboard with real-time WebSocket updates and Discord webhook alerts.
 
 ---
 
 ## 📊 Backtest Results
 
-### Full Strategy (LONG + SHORT) — 12 Months
-
-| Metric | BTCUSDT | ETHUSDT | **Combined** |
-|--------|---------|---------|-------------|
-| **Total Trades** | 936 | 1,584 | **2,520** |
-| **Win Rate** | 37.8% | 39.0% | **38.6%** |
-| **Total P&L** | $6,397.05 | $14,599.89 | **$20,996.94** |
-| **Total Return** | — | — | **419.94%** |
-| **Avg Monthly P&L** | $533.09 | $1,216.66 | **$1,749.74** |
-| **Avg R:R** | 1.38 | 1.39 | **1.39** |
-
 ### Spot-Only (LONG Only — Matches Binance Spot) — 12 Months
 
 | Metric | BTCUSDT | ETHUSDT | **Combined** |
 |--------|---------|---------|-------------|
-| **Total LONG Trades** | 749 | 1,412 | **2,161** |
-| **Win Rate** | 37.5% | 39.4% | **38.7%** |
-| **Total P&L** | $4,771.43 | $14,334.84 | **$19,106.27** |
-| **Total Return** | — | — | **382.13%** |
+| **Total Trades** | 840 | 1,413 | **2,253** |
+| **Win Rate** | 38.7% | 38.6% | **38.6%** |
+| **Total P&L** | +$7,012.73 | +$12,252.21 | **+$19,264.94** |
+| **Total Return** | — | — | **+385.3%** |
+| **Avg Monthly P&L** | $584.39 | $1,021.02 | **$1,605.41** |
+| **Avg R:R** | 1.39 | 1.38 | **1.38** |
+| **Avg Max DD** | 9.5% | 9.6% | **~9.5%** |
 
-> **Note:** Results vary by ~10-15% between runs due to live-fetched data and shifting 30-day month boundaries. Run `python backtest_okx.py --months 12` to get current numbers.
+> Run `python backtest_okx.py --months 12 --spot` to get current numbers. Results vary by ~5-10% between runs due to live-fetched data and shifting 30-day month boundaries.
 
 ---
 
 ## 🏗️ Architecture Overview
 
 ```
-OKX REST API / Binance REST + WebSocket (15s poll)
+Binance REST API (public, 15s poll)
                     │
                     ▼
-  ┌─────────────────────────┐     ┌──────────────────────────┐
-  │    ICT Engine            │────▶│  Signal Engine            │
-  │  (7 vectorized modules)  │     │  (dual-scoring 0-100)    │
-  └─────────────────────────┘     └────────────┬─────────────┘
-            ▲                                   │
-            │                                   ▼
-  ┌─────────────────────────┐     ┌──────────────────────────┐
-  │   Candle Buffers         │     │  Demo Account ($5,000)   │
-  │  (5m / 15m / 1m)        │     │  (forward-testing)       │
-  └─────────────────────────┘     └────────────┬─────────────┘
-            ▲                                   │
-            │                                   ▼
-  ┌─────────────────────────┐     ┌──────────────────────────┐
-  │  HTF Bias Worker         │     │  LiveExecutor + SyncWorker│
-  │  (1h EMA, 15min cycle)   │     │  (Binance Spot, 30s sync)│
-  └─────────────────────────┘     └────────────┬─────────────┘
-            ▲                                   │
-            │                                   ▼
-  ┌─────────────────────────┐     ┌──────────────────────────┐
-  │  OKX ↔ Binance Fallback  │     │  Discord Bot + FastAPI   │
-  │  (no API key needed)     │     │  (alerts + dashboard)    │
-  └─────────────────────────┘     └──────────────────────────┘
+  ┌─────────────────────────────┐     ┌──────────────────────────┐
+  │  TradingOrchestrator         │────▶│  ICT Pipeline             │
+  │  (unified entry point)       │     │  (7 vectorized modules)  │
+  │  - runs per candle close     │     │  - Market Structure      │
+  │  - coordinates all steps     │     │  - Liquidity             │
+  └──────────────┬──────────────┘     │  - FVG / Order Blocks    │
+                 │                     │  - Premium/Discount OTE  │
+                 ▼                     │  - Sessions / Kill Zones │
+  ┌─────────────────────────────┐     └────────────┬─────────────┘
+  │  Signal Engine               │◀─────────────────┘
+  │  (dual-scoring 0-100)       │
+  │  - HTF alignment filter     │
+  │  - Spot-only SHORT filter   │
+  └──────────────┬──────────────┘
+                 │
+                 ▼
+  ┌─────────────────────────────┐     ┌──────────────────────────┐
+  │  DemoAccount ($5,000)        │────▶│  LiveExecutor            │
+  │  - forward-testing engine    │     │  (Binance Spot via CCXT) │
+  │  - SL/TP check each cycle    │     │  - Market buy + OCO SL/TP│
+  │  - performance tracking      │     │  - 30s sync reconciliation│
+  └──────────────┬──────────────┘     └────────────┬─────────────┘
+                 │                                   │
+                 ▼                                   ▼
+  ┌─────────────────────────────┐     ┌──────────────────────────┐
+  │  FastAPI (REST + WebSocket)  │     │  Discord Bot             │
+  │  - /ws/prices (live ticks)  │     │  (webhook alerts)        │
+  │  - /ws/data (full snapshot) │     └──────────────────────────┘
+  │  - REST endpoints           │
+  └──────────────┬──────────────┘
+                 │
+                 ▼
+  ┌─────────────────────────────┐
+  │  React Dashboard            │
+  │  - real-time via useDataStream (WS + REST fallback)  │
+  │  - 6 pages: Overview, Signals, Charts, TradeLog,    │
+  │    RiskCenter, Settings                              │
+  └─────────────────────────────┘
 ```
 
 ### Layer 1: ICT Engine (`ict_engine/`)
@@ -66,28 +74,35 @@ OKX REST API / Binance REST + WebSocket (15s poll)
 
 | Module | File | Detection | Confluence Pts |
 |---|---|---|---|
-| **Market Structure** | `market_structure.py` | Swing highs/lows, Break of Structure (BOS), Market Structure Shift (MSS) | 20 |
-| **Liquidity** | `liquidity.py` | Equal highs/lows, liquidity sweeps, previous day high/low | 20 |
-| **Fair Value Gap** | `fvg.py` | 3-candle imbalances (bullish/bearish) with status tracking | 15 |
-| **Order Blocks** | `order_blocks.py` | Last candle before >2× ATR impulse, with validity tracking | 15 |
+| **Market Structure** | `market_structure.py` | Swing highs/lows, BOS, MSS | 20 |
+| **Liquidity** | `liquidity.py` | Equal highs/lows, sweeps, prev day H/L | 20 |
+| **Fair Value Gap** | `fvg.py` | 3-candle imbalances with status tracking | 15 |
+| **Order Blocks** | `order_blocks.py` | Last candle before >2× ATR impulse | 15 |
 | **Premium/Discount** | `premium_discount.py` | Equilibrium zones + OTE (62-79% fib) | 10 + 10 |
 | **Sessions** | `sessions.py` | Asian/London/NY sessions + Kill Zones | 10 |
-| **Breaker Blocks** | `breaker_block.py` | Order block failures that reverse role | — |
 
-### Layer 2: Signal Engine (`signal_engine/engine.py`)
+### Layer 2: Trading Orchestrator (`trading_engine/orchestrator.py`)
 
-Unique **dual-scoring** system (bullish vs. bearish independently, 0-100 each):
+Unified entry point that coordinates the entire pipeline:
 
-- `net = bullish - bearish` determines signal direction
-- `confidence = max(bullish, bearish)` determines signal strength
-- **net ≥ 60** → STRONG_BUY, **net ≥ 30** → BUY, **net > -30** → NEUTRAL, etc.
-- HTF alignment: signals must align with 1h EMA bias (12/26, 0.5% threshold)
-- Entry requires: **score ≥ min_score AND inside a kill zone AND HTF aligned**
+1. Runs ICT pipeline on both 5m and 15m data
+2. Generates signals via **dual-scoring** engine (bullish vs. bearish independently)
+3. **HTF alignment filter** — signals must align with 1h EMA bias (12/26, 0.5% threshold)
+4. **Spot-only filter** — removes ALL SHORT signals (Binance Spot only supports LONG)
+5. Feeds qualifying signals to DemoAccount (requires: score ≥ min_score AND kill zone AND HTF aligned)
+6. Mirrors newly opened positions to Binance via LiveExecutor (market buy + OCO SL/TP)
+7. Sends Discord notifications per new position
+
+**Dual-scoring signal types:**
+- `net = bullish - bearish` determines direction
+- `confidence = max(bullish, bearish)` determines strength
+- **net ≥ 60** → STRONG_BUY, **net ≥ 30** → BUY, **net > -30** → NEUTRAL
+- **net ≤ -30** → SELL, **net ≤ -60** → STRONG_SELL
 
 ### Layer 3: Demo Account (`demo_account.py`)
 
 Stateful forward-testing engine:
-- **$5,000** paper capital (configurable via `DEMO_INITIAL_BALANCE` env var)
+- **$5,000** paper capital (configurable via `DEMO_INITIAL_BALANCE`)
 - **1% risk** per trade (of current balance)
 - **0.5× ATR** stop loss (per-symbol via `symbol_sl_multipliers`), **1:2** risk-reward
 - **0 min** re-entry cooldown
@@ -98,42 +113,42 @@ Stateful forward-testing engine:
 
 ### Layer 4: Live Execution (`execution/`)
 
-- **LiveExecutor** (`executor.py`): Connects to Binance Spot via CCXT (demo trading portal or testnet)
+- **LiveExecutor** (`executor.py`): Connects to Binance Spot via CCXT (demo/testnet/live)
   - Places market buy orders with OCO (One-Cancels-Other) for SL + TP
-  - **Spot-only: SHORT signals are filtered upstream** — DemoAccount never opens SHORT positions when an exchange is connected
+  - **Spot-only**: SHORT signals filtered upstream by orchestrator
   - Caps position sizes to available USDT balance (spot is 1:1, no leverage)
-- **SyncWorker** (`sync_worker.py`): Reconciles DemoAccount with exchange positions every 30s
+- **SyncWorker** (`sync_worker.py`): Reconciles DemoAccount ↔ exchange every 30s
   - Detects SL/TP hits on exchange → closes in DemoAccount
-  - Detects manual closes → records with SYNC_ prefix
-  - Logs quantity/side discrepancies
+  - Handles partial fills, manual closes, quantity/side discrepancies
 
 ### Layer 5: API + Dashboard
 
 **Backend** (`api/main.py`):
-- **FastAPI** server with dual data source (OKX REST ↔ Binance REST, no API key needed)
-- 3 background workers: crypto data fetcher (15s poll), HTF bias updater (15min), exchange sync (30s)
-- WebSocket endpoint (`/ws/prices`) for live streaming with mock fallback
-- **Smart fallback**: silently probes OKX and Binance on startup, uses the working source, re-probes fallback every 30min
-- Endpoints: `/signals`, `/trades`, `/performance`, `/demo/account`, `/risk/status`, `/candles/{symbol}`, `/backtest-data/{symbol}`, `/reset`, `/sync`, `/api/health`
-- Self-contained: mounts dashboard static build at `/dashboard`
-- `POST /reset` — clears all DemoAccount state, signals, trades for a fresh start
+- **FastAPI** server with 3 background workers:
+  - Crypto data fetcher (Binance REST, 15s poll) — ticker + candles → ICT pipeline
+  - HTF bias updater (1h EMA, 15min cycle)
+  - Exchange sync (30s, only if credentials available)
+- WebSocket endpoints:
+  - `/ws/prices` — live BTC/ETH tick stream (250ms updates)
+  - `/ws/data` — full state snapshot (signals, trades, demo, risk, performance, health) on connect + push on data change + 30s heartbeat
+- REST endpoints: `/signals`, `/trades`, `/performance`, `/demo/account`, `/risk/status`, `/candles/{symbol}`, `/backtest-data/{symbol}`, `/reset`, `/sync`, `/api/health`
+- Dashboard build mounted at `/dashboard`
 
 **Frontend** (`dashboard/`):
 - React 19 + TypeScript + Vite + Tailwind CSS v4
-- 6 pages: Overview, Signals (with detail panel), Charts (with EMA bias), Trade Log (with open positions), Risk Center (with position sizing calculator), Settings (with live signal weight config)
-- Lightweight Charts (TradingView) for candlestick visualization
-- TanStack Query for data fetching with auto-refresh
-- WebSocket price stream with auto-reconnect and exponential backoff → mock fallback
-- Unit tested: `usePriceStream.test.ts` covers connect, reconnect, backoff, fallback, malformed messages
+- **6 pages**: Overview, Signals, Charts (Lightweight Charts), Trade Log, Risk Center (with position sizing calculator), Settings
+- **Real-time data**: `useDataStream` hook connects to `/ws/data` for instant updates, falls back to REST polling every 15s with periodic WS retry every ~60s
+- **Live prices**: `usePriceStream` WebSocket hook with mock fallback
+- Unit tested: 13 tests via Vitest
 
 **Discord Bot** (`discord/bot.py`):
-- Sends formatted embedded messages via webhook
-- Triggers on signals with **score ≥ 80 AND in kill zone**
+- Sends formatted embedded messages via webhook (10s timeout)
+- Triggers on signals that DemoAccount actually opened
 - Shows confluence breakdown, price levels, trend bias, price movement from trigger
 
 ---
 
-## 📊 Current Configuration (Optimized)
+## ⚙️ Current Configuration
 
 | Parameter | BTCUSDT | ETHUSDT |
 |---|---|---|
@@ -144,16 +159,8 @@ Stateful forward-testing engine:
 | **Max Positions** | 3 (shared) | 3 (shared) |
 | **Kill Zone Required** | Yes | Yes |
 | **HTF Alignment** | Yes | Yes |
-| **Data Source** | OKX / Binance (auto-fallback) | OKX / Binance (auto-fallback) |
-
-### Optimization History
-
-| Config | ETH P&L (12mo) | BTC P&L (12mo) | Combined |
-|---|---|---|---|
-| Original (BTC 1.0×/0cd/70, ETH 2.0×/60cd/80) | +$2,147 | +$3,867 | **+$6,013** |
-| Tight SL (both 0.5×, ETH 60cd/80) | +$5,135 | +$19,786 | **+$24,921** |
-| **Unified (both 0.5×/0cd/70)** | **+$18,635** | **+$19,786** | **+$38,421** |
-| **Optimized (both 0.5×/0cd/60)** | **+$25,582** | **+$23,042** | **+$48,624** |
+| **Data Source** | Binance (public REST, no API key) | Binance (public REST, no API key) |
+| **Allowed Sides** | LONG only (spot) | LONG only (spot) |
 
 ---
 
@@ -162,63 +169,44 @@ Stateful forward-testing engine:
 ### Prerequisites
 - Python 3.12+
 - Node.js 18+ (for dashboard)
-- Binance API keys (for exchange execution — optional, signals work without them)
+- Binance API keys (optional — for exchange execution only, signals work without them)
 
 ### One-Command Start
-
 ```bash
 ./start.sh
 ```
+Runs: Python venv → pip install → npm install → connection test → API server → dashboard.
 
-This runs the full stack: Python venv setup → pip install → npm install → connection test → API server → dashboard.
-
-### Manual Backend Setup
-
+### Manual Backend
 ```bash
-# Virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Start API server
 uvicorn api.main:app --reload --port 8000
 ```
 
-### Dashboard Setup
-
+### Dashboard
 ```bash
 cd dashboard
 npm install
-npm run dev
+npm run dev          # dev server at http://localhost:5173
+# OR
+npm run build        # static build served at http://localhost:8000/dashboard
 ```
 
-Then open `http://localhost:5173/dashboard/` (or `http://localhost:8000/dashboard` if using the API server's static mount).
-
 ### Running Backtests
-
 ```bash
-# 12-month rolling backtest (all months, sequential)
-python backtest_okx.py
+# 12-month spot-only backtest (LONG only — matches Binance Spot)
+python backtest_okx.py --months 12 --spot
 
-# 12-month spot-only backtest (LONG only, matches Binance Spot)
-python backtest_okx.py --spot
+# Single month (offset 0 = newest)
+python backtest_okx.py --offset 3 --spot
 
-# Single month (offset 0 = newest, 11 = oldest)
-python backtest_okx.py --offset 3
+# Debug mode with per-trade forensic analysis
+python backtest_okx.py --debug --offset 2 --spot
 
-# Parallel symbol processing (faster but both symbols at once)
-python backtest_okx.py --parallel
-
-# Custom capital (default: $5,000)
-python backtest_okx.py --capital 10000
-
-# Single symbol
-python backtest_okx.py --symbol ETHUSDT
-
-# Per-trade forensic debug analysis
-python backtest_okx.py --debug --offset 2
+# Custom capital
+python backtest_okx.py --months 12 --spot --capital 10000
 ```
 
 ---
@@ -226,70 +214,22 @@ python backtest_okx.py --debug --offset 2
 ## 🧪 Testing
 
 ```bash
-# ICT engine unit tests (Python)
+# ICT engine unit tests
 pytest tests/test_ict_engine.py -v
 
-# Dashboard unit tests (Vitest)
+# Dashboard tests
 cd dashboard && npm test
 
-# Connection test (verifies Binance demo credentials)
+# Binance connection test
 python test_live_connection.py
 
-# Integration test (starts server, monitors data flow)
+# End-to-end integration test
 python test_integration.py
 ```
 
 ---
 
-## 🐳 Deployment
-
-The system is designed to run on **Railway** (or any cloud host):
-
-```bash
-# Use the render.yaml for Railway deployment
-```
-
-Environment variables (see `.env.example`):
-- `BINANCE_API_KEY` / `BINANCE_SECRET` — Binance exchange credentials (optional)
-- `DISCORD_WEBHOOK_URL` — Discord channel webhook for signal alerts (optional)
-- `DEMO_INITIAL_BALANCE` — Paper trading starting capital (default: 5000)
-- `EXCHANGE_MODE` — `demo` (default) or `live`
-- `EXCHANGE_NAME` — `binance` (default) or `okx`
-
----
-
-## 📈 Backtesting Framework
-
-### `backtest_okx.py`
-- Fetches 30 days of 5m data per month via OKX history API (falls back to Binance klines)
-- **Key optimization**: pre-computes all 7 ICT modules once (vectorized Polars) instead of re-running per candle
-- Walks candle-by-candle to match live system logic exactly
-- Tracks signals generated, kept, bias changes, and trade execution
-- Outputs per-month results and N-month aggregate summary
-- Supports `--months N`, `--offset N`, `--parallel`, `--symbol S`, `--capital N`, `--spot`, `--debug` flags
-- `--debug` flag enables per-trade forensic analysis: held candles, SL/TP distances, consecutive loss streaks, re-entry patterns
-- Saves trade log as JSON when `--debug` is used
-
----
-
-## 🔐 Risk Management
-
-The system enforces multiple layers of risk controls:
-
-| Control | Value | Description |
-|---------|-------|-------------|
-| **Risk Per Trade** | 1% | Fixed % of current account balance |
-| **Daily Loss Limit** | 3% | Circuit breaker — stops trading after this loss |
-| **Max Open Positions** | 3 | Shared across all symbols |
-| **Re-entry Cooldown** | 0 min | No wait between same-direction entries |
-| **Stop Loss** | 0.5× ATR | Per-symbol ATR multiplier |
-| **Take Profit** | 2× SL distance | Fixed 1:2 risk-reward |
-
-The **Risk Center** dashboard page includes a Position Sizing Calculator that computes position size, risk amount, potential profit, and R:R ratio from account balance, risk %, entry, and stop/target prices.
-
----
-
-## 🔧 API Endpoints
+## 🌐 API Endpoints
 
 | Endpoint | Description |
 |----------|-------------|
@@ -297,57 +237,85 @@ The **Risk Center** dashboard page includes a Position Sizing Calculator that co
 | `GET /api/health` | System health — prices, bias, uptime, cycle counts |
 | `GET /signals?limit=N` | Recent ICT-generated signals |
 | `GET /signals/{id}` | Single signal detail |
-| `GET /candles/{symbol}?timeframe=X&limit=N` | OHLCV candles from OKX/Binance |
-| `GET /backtest-data/{symbol}?days=N&bar=X` | Paginated historical OHLCV for backtesting |
-| `GET /trades?limit=N&result=X&symbol=Y` | Closed trades from DemoAccount |
-| `GET /performance` | Computed performance metrics |
-| `GET /demo/account` | Demo account — balance, open positions, P&L |
-| `GET /risk/status` | Current risk management state |
-| `POST /reset` | Clear all DemoAccount state for fresh start |
-| `POST /sync` | Manually trigger exchange position reconciliation |
-| `WS /ws/prices` | WebSocket live price stream |
+| `GET /candles/{symbol}?timeframe=X&limit=N` | OHLCV candles from Binance |
+| `GET /backtest-data/{symbol}?days=N&bar=X` | Paginated historical OHLCV |
+| `GET /trades?limit=N&result=X&symbol=Y` | Closed DemoAccount trades |
+| `GET /performance` | Performance metrics |
+| `GET /demo/account` | Demo account state |
+| `GET /risk/status` | Risk management state |
+| `POST /reset` | Clear all state for fresh start |
+| `POST /sync` | Trigger exchange reconciliation |
+| `WS /ws/prices` | Live BTC/ETH price stream (250ms) |
+| `WS /ws/data` | Full state snapshot stream (real-time + 30s heartbeat) |
+
+### WebSocket `/ws/data` Message Format
+```json
+{
+  "type": "snapshot",
+  "signals": [...],
+  "trades": [...],
+  "demo_account": {...},
+  "health": {...},
+  "risk_status": {...},
+  "performance": {...}
+}
+```
+
+---
+
+## 🔐 Risk Management
+
+| Control | Value | Description |
+|---------|-------|-------------|
+| **Risk Per Trade** | 1% | Fixed % of current balance |
+| **Daily Loss Limit** | 3% | Circuit breaker — stops trading after this loss |
+| **Max Open Positions** | 3 | Shared across all symbols |
+| **Stop Loss** | 0.5× ATR | Per-symbol ATR multiplier |
+| **Take Profit** | 2× SL distance | Fixed 1:2 risk-reward |
 
 ---
 
 ## 📁 Project Structure
 
 ```
-├── ict_engine/              # ICT mathematical core (7 modules)
-│   ├── market_structure.py   # Swing highs/lows, BOS, MSS
-│   ├── liquidity.py          # Equal highs/lows, sweeps, prev day levels
-│   ├── fvg.py                # Fair Value Gaps with status tracking
-│   ├── order_blocks.py       # Order block detection with validity
-│   ├── premium_discount.py   # Equilibrium, OTE (62-79% fib) zones
-│   ├── sessions.py           # Trading sessions, kill zones
-│   ├── breaker_block.py      # Breaker blocks
-│   └── utils.py              # ATR, SMMA calculations
+├── trading_engine/
+│   └── orchestrator.py         # Unified signal pipeline coordinator
+├── ict_engine/                 # ICT mathematical core (6 modules)
+│   ├── market_structure.py     # Swing highs/lows, BOS, MSS
+│   ├── liquidity.py            # Equal highs/lows, sweeps, prev day levels
+│   ├── fvg.py                  # Fair Value Gaps
+│   ├── order_blocks.py         # Order block detection
+│   ├── premium_discount.py     # Equilibrium, OTE (62-79% fib) zones
+│   ├── sessions.py             # Trading sessions, kill zones
+│   └── utils.py                # ATR, SMMA calculations
 ├── signal_engine/
-│   └── engine.py             # Dual-scoring confluence engine (0-100)
+│   └── engine.py               # Dual-scoring confluence engine
 ├── execution/
-│   ├── executor.py           # Binance Spot demo trading (CCXT, OCO orders)
-│   └── sync_worker.py        # DemoAccount ↔ exchange reconciliation
+│   ├── executor.py             # Binance Spot demo trading (CCXT, OCO)
+│   └── sync_worker.py          # DemoAccount ↔ exchange reconciliation
 ├── api/
-│   ├── main.py               # FastAPI server + 3 background workers
-│   └── static/               # Dashboard build output (auto-built)
-├── dashboard/                # React 19 frontend
+│   ├── main.py                 # FastAPI + 3 background workers + WebSockets
+│   └── static/                 # Dashboard build output
+├── dashboard/
 │   └── src/
-│       ├── pages/            # Overview, Signals, Charts, TradeLog, RiskCenter, Settings
-│       ├── components/       # Layout, ICTChart, EMABiasChart
-│       ├── services/         # api.ts, settingsService.ts (localStorage persisted)
-│       ├── utils/            # signalCalculator.ts (heuristic signal inference)
-│       └── hooks/            # usePriceStream.ts (WS + mock fallback)
+│       ├── pages/              # Overview, Signals, Charts, TradeLog, RiskCenter, Settings
+│       ├── components/         # Layout, ICTChart, EMABiasChart, SignalBadge
+│       ├── hooks/              # useDataStream.ts (WS + REST fallback), usePriceStream.ts
+│       ├── services/           # api.ts, settingsService.ts
+│       ├── utils/              # format.ts, signalCalculator.ts
+│       └── types.ts            # Shared TypeScript interfaces
 ├── discord/
-│   └── bot.py                # Discord webhook notifier (rich embeds)
+│   └── bot.py                  # Discord webhook notifier
 ├── risk/
-│   └── manager.py            # Risk management rules engine
+│   └── manager.py              # Risk management rules
 ├── tests/
-│   └── test_ict_engine.py    # ICT engine unit tests
-├── backtest_okx.py           # 12-month rolling backtest
-├── demo_account.py           # Forward-testing engine
-├── test_live_connection.py   # Binance demo connection test
-├── test_integration.py       # End-to-end integration test
-├── start.sh                  # One-command startup script
-└── render.yaml               # Railway deployment blueprint
+│   └── test_ict_engine.py      # ICT engine unit tests
+├── backtest_okx.py             # 12-month rolling backtest
+├── demo_account.py             # Forward-testing engine
+├── test_live_connection.py     # Binance demo connection test
+├── test_integration.py         # E2E integration test
+├── start.sh                    # One-command startup
+└── render.yaml                 # Railway deployment blueprint
 ```
 
 ---
@@ -355,15 +323,15 @@ The **Risk Center** dashboard page includes a Position Sizing Calculator that co
 ## 📚 ICT Concepts Implemented
 
 ### Market Structure
-- **Swing High/Low**: N-candle lookback (default N=3) peak/trough detection
-- **Break of Structure (BOS)**: Close above swing high (bullish) or below swing low (bearish)
-- **Market Structure Shift (MSS)**: Previous swing taken + close beyond recent opposing swing
-- **Trend Bias**: HH+HL sequence = bullish, LL+LH = bearish
+- **Swing High/Low**: N-candle lookback (N=3) peak/trough detection
+- **Break of Structure (BOS)**: Close above/below last swing
+- **Market Structure Shift (MSS)**: Previous swing taken + close beyond opposing swing
+- **Trend Bias**: HH+HL = bullish, LL+LH = bearish
 
 ### Liquidity
 - **Equal Highs/Lows**: Within ATR × 0.10 threshold
-- **Liquidity Sweeps**: Break below/above liquidity then close back above/below
-- **Previous Day levels**: High, low, open, close (computed from daily aggregation)
+- **Liquidity Sweeps**: Break below/above then close back above/below
+- **Previous Day levels**: High, low from daily aggregation
 
 ### Fair Value Gaps
 - **Bullish FVG**: Candle1 high < Candle3 low (gap upward)
@@ -373,21 +341,22 @@ The **Risk Center** dashboard page includes a Position Sizing Calculator that co
 ### Order Blocks
 - **Bullish OB**: Last bearish candle before >2× ATR bullish impulse
 - **Bearish OB**: Last bullish candle before >2× ATR bearish impulse
-- Validity tracking: UNTOUCHED → TOUCHED → MITIGATED → INVALIDATED
 
-### Premium / Discount
-- **Equilibrium**: (high + low) / 2 over recent range (swing-based, falls back to 20-candle range)
-- **Premium**: Price above equilibrium (overvalued — bearish bias)
-- **Discount**: Price below equilibrium (undervalued — bullish bias)
-- **OTE Zone**: 62%–79% Fibonacci retracement (optimal trade entry)
+### Premium / Discount / OTE
+- **Equilibrium**: (high + low) / 2 over swing range
+- **Premium**: Price above equilibrium (overvalued)
+- **Discount**: Price below equilibrium (undervalued)
+- **OTE Zone**: 62%–79% Fibonacci retracement
 
-### Sessions & Kill Zones (Crypto)
-- **Asian Session**: 00:00–09:00 UTC
-- **London Session**: 08:00–17:00 UTC
-- **New York Session**: 13:00–22:00 UTC
-- **London Kill Zone**: 07:00–09:00 UTC
-- **New York Kill Zone**: 13:00–15:00 UTC
-- **London Close**: 17:00–18:00 UTC
+### Sessions & Kill Zones (UTC)
+| Zone | Time (UTC) |
+|------|-----------|
+| Asian Session | 00:00–09:00 |
+| London Session | 08:00–17:00 |
+| New York Session | 13:00–22:00 |
+| London Kill Zone | 07:00–09:00 |
+| NY Kill Zone | 13:00–15:00 |
+| London Close | 17:00–18:00 |
 
 ---
 
