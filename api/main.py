@@ -326,6 +326,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     if len(_recent_signals) > 500:
         _recent_signals = _recent_signals[:500]
 
+    _symbols_before = set()  # default empty — if process_signals isn't reached, no Discord alerts fire
     try:
         current_prices = dict(_latest_prices)
         for s in all_signals:
@@ -350,6 +351,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
         # Process in the built-in simulator (DemoAccount)
         # DemoAccount handles: min_score threshold, kill zone, HTF alignment, cooldown, daily loss limit
         if all_signals:
+            _symbols_before = set(_demo_account.open_positions.keys())
             _demo_account.process_signals(all_signals, current_prices)
 
         # ─── Live / Exchange Demo Execution ───
@@ -404,18 +406,18 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     except Exception as e:
         logger.warning(f"[Crypto] Demo account failed: {e}")
 
-    # Only send Discord alerts for signals that will actually open a new position
-    # Skip if we already have an open position for that symbol
+    # ── Discord alerts: only for signals that DemoAccount actually opened a position for ──
+    # Compare open_positions before vs after process_signals to know which trades were opened.
+    # DemoAccount already handles: min_score threshold, kill zone, cooldown, daily loss, max positions.
+    # Deduplicate by symbol — multiple timeframes (5m, 15m) can produce signals for the same symbol,
+    # but only one position is opened per symbol. No need to notify twice.
     if discord_bot:
+        _notified = set()
         for s in all_signals:
             symbol = s.get("symbol", "")
-            stype = s.get("signal_type", "NEUTRAL")
-            score_val = s.get("score", 0)
-            in_kz = s.get("in_kill_zone", False)
-            if score_val >= 80 and in_kz:
-                if symbol in _demo_account.open_positions:
-                    logger.info(f"[Discord] Skipping {symbol} {stype} — position already open")
-                    continue
+            # Only send if this signal resulted in a brand-new position, once per symbol
+            if symbol in _demo_account.open_positions and symbol not in _symbols_before and symbol not in _notified:
+                _notified.add(symbol)
                 try:
                     await discord_bot.send_signal(s)
                 except Exception as e:
