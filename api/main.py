@@ -420,6 +420,9 @@ OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
 
 # ── Dual data source: OKX (works on Railway) + Binance (works locally) ──
 _active_data_source = "unknown"
+_preferred_source: Optional[str] = None  # "okx" or "binance" — determined by silent startup probe
+_last_fallback_attempt: Optional[datetime] = None
+_FALLBACK_RETRY_SECONDS = 1800  # 30 min between fallback re-probes
 
 
 async def _okx_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
@@ -505,27 +508,62 @@ async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Opt
 
 
 async def _fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[List[Dict]]:
-    """Fetch OHLCV candles from any available source.
+    """Fetch OHLCV candles — only tries the preferred source per cycle.
 
-    Tries OKX first (works on Railway), falls back to Binance (works locally).
-    Updates _active_data_source for health tracking.
+    On first call, silently probes both APIs to determine which one works
+    (OKX on Railway, Binance locally). Subsequent calls only hit the preferred
+    source — zero noise from the blocked API. If the preferred source fails,
+    re-probes the fallback every 30 min.
     """
-    global _active_data_source
-    candles = await _okx_fetch_candles(symbol, bar, limit)
-    if candles:
-        if _active_data_source != "okx":
-            logger.info(f"[Data] Using OKX (symbol={symbol} bar={bar})")
+    global _active_data_source, _preferred_source, _last_fallback_attempt
+
+    # ── First call: silently probe both APIs ──
+    if _preferred_source is None:
+        okx_result = await _okx_fetch_candles(symbol, bar, min(limit, 5))
+        if okx_result:
+            _preferred_source = "okx"
             _active_data_source = "okx"
             _health["data_sources"] = ["OKX (REST, 15s poll)"]
+            logger.info(f"[Data] Preferred source: OKX")
+        else:
+            binance_result = await _binance_fetch_candles(symbol, bar, min(limit, 5))
+            if binance_result:
+                _preferred_source = "binance"
+                _active_data_source = "binance"
+                _health["data_sources"] = ["Binance (REST, 15s poll)"]
+                logger.info(f"[Data] Preferred source: Binance REST")
+            else:
+                _preferred_source = "okx"  # default when neither works
+                logger.warning("[Data] Neither API responded on startup — defaulting to OKX")
+
+    # ── Try preferred source only ──
+    candles = None
+    if _preferred_source == "okx":
+        candles = await _okx_fetch_candles(symbol, bar, limit)
+    else:
+        candles = await _binance_fetch_candles(symbol, bar, limit)
+
+    if candles:
+        if _active_data_source != _preferred_source:
+            logger.info(f"[Data] Back on {_preferred_source.upper()} ({symbol})")
+            _active_data_source = _preferred_source
+            _health["data_sources"] = [f"{_preferred_source.upper()} (REST, 15s poll)"]
         return candles
 
-    candles = await _binance_fetch_candles(symbol, bar, limit)
-    if candles:
-        if _active_data_source != "binance":
-            logger.info(f"[Data] Using Binance REST (symbol={symbol} bar={bar})")
-            _active_data_source = "binance"
-            _health["data_sources"] = ["Binance (REST, 15s poll)"]
-        return candles
+    # ── Preferred source failed — try fallback (max once per 30 min) ──
+    now = datetime.now(timezone.utc)
+    if _last_fallback_attempt is None or (now - _last_fallback_attempt).total_seconds() > _FALLBACK_RETRY_SECONDS:
+        _last_fallback_attempt = now
+
+        fallback = "binance" if _preferred_source == "okx" else "okx"
+        fallback_result = await _binance_fetch_candles(symbol, bar, limit) if fallback == "binance" else await _okx_fetch_candles(symbol, bar, limit)
+
+        if fallback_result:
+            logger.info(f"[Data] Switched to {fallback.upper()} (preferred {_preferred_source.upper()} unavailable)")
+            _preferred_source = fallback
+            _active_data_source = fallback
+            _health["data_sources"] = [f"{fallback.upper()} (REST, 15s poll)"]
+            return fallback_result
 
     logger.warning(f"[Data] Both OKX and Binance failed for {symbol} {bar}")
     return None
@@ -601,15 +639,20 @@ async def _binance_fetch_ticker(symbol: str) -> Optional[Dict]:
 
 
 async def _fetch_ticker(symbol: str) -> Optional[Dict]:
-    """Fetch live ticker from any available source.
+    """Fetch live ticker from preferred source (no fallback noise per cycle).
 
-    Tries OKX first, falls back to Binance.
-    Returns dict with: price, change_24h, high_24h, low_24h, volume
+    Uses the same source as _fetch_candles. If the preferred source is known,
+    only that API is attempted (no wasted requests to a blocked API).
     """
-    ticker = await _okx_fetch_ticker(symbol)
-    if ticker:
-        return ticker
-    return await _binance_fetch_ticker(symbol)
+    if _preferred_source == "okx":
+        return await _okx_fetch_ticker(symbol)
+    elif _preferred_source == "binance":
+        return await _binance_fetch_ticker(symbol)
+    else:
+        ticker = await _okx_fetch_ticker(symbol)
+        if ticker:
+            return ticker
+        return await _binance_fetch_ticker(symbol)
 
 
 async def _crypto_data_worker():
@@ -621,9 +664,6 @@ async def _crypto_data_worker():
 
     await _backfill_crypto_buffers()
     _last_ts: Dict[str, datetime] = {}  # track last confirmed candle timestamp
-
-    # Log which data source is working
-    logger.info(f"[Data] Active source: {_active_data_source}")
 
     # Background Binance WS attempt (may or may not work from cloud IPs)
     BINANCE_WS_URL = "wss://stream.binance.com:9443/stream"
