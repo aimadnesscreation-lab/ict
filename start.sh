@@ -66,11 +66,11 @@ if [ ! -f ".env" ]; then
     fi
 fi
 
-if grep -q "BINANCE_API_KEY=$" .env 2>/dev/null || grep -q "BINANCE_API_KEY=your_" .env 2>/dev/null; then
+if grep -q "^BINANCE_API_KEY=$" .env 2>/dev/null || grep -q "^BINANCE_API_KEY=your_" .env 2>/dev/null; then
     warn "BINANCE_API_KEY is empty or placeholder in .env"
     warn "The server will start but Binance trading will be disabled."
     warn "Edit .env with your credentials to enable live execution."
-elif grep -q "BINANCE_SECRET=$" .env 2>/dev/null || grep -q "BINANCE_SECRET=your_" .env 2>/dev/null; then
+elif grep -q "^BINANCE_SECRET=$" .env 2>/dev/null || grep -q "^BINANCE_SECRET=your_" .env 2>/dev/null; then
     warn "BINANCE_SECRET is empty or placeholder in .env"
     warn "Edit .env with your credentials to enable live execution."
 fi

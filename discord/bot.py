@@ -19,7 +19,8 @@ class DiscordBot:
         """Format and send a signal to Discord as an embedded message."""
         embed = self._build_embed(signal)
         try:
-            async with httpx.AsyncClient() as client:
+            timeout = httpx.Timeout(10.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     self.webhook_url,
                     json={

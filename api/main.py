@@ -392,7 +392,7 @@ async def _crypto_data_worker():
     Polls Binance REST every 15s for ticker + candles.
     On new candle close: runs orchestrator.process_candle_close().
     """
-    global _latest_prices, _latest_ticks
+    global _latest_prices, _latest_ticks, _recent_signals, _recent_trades, _performance_cache
 
     await _backfill_buffers()
     _last_ts: Dict[str, datetime] = {}
