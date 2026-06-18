@@ -109,14 +109,18 @@ else
 fi
 
 # ── Step 5: Quick connection test ────────────────────────────
-info "Running connection test..."
-TEST_OUTPUT=$(python test_live_connection.py 2>&1)
-echo "$TEST_OUTPUT"
-if echo "$TEST_OUTPUT" | grep -q "✅ ALL"; then
-    ok "Binance demo connection verified"
+if [ -f "test_live_connection.py" ]; then
+    info "Running connection test..."
+    TEST_OUTPUT=$(python test_live_connection.py 2>&1) || true
+    echo "$TEST_OUTPUT"
+    if echo "$TEST_OUTPUT" | grep -q "✅ ALL"; then
+        ok "Binance demo connection verified"
+    else
+        warn "Connection test did not pass all checks — check your .env credentials."
+        warn "The server will start but exchange execution may not work."
+    fi
 else
-    warn "Connection test did not pass all checks — check your .env credentials."
-    warn "The server will start but exchange execution may not work."
+    warn "test_live_connection.py not found — skipping connection test."
 fi
 
 # ── Step 6: Check port availability ────────────────────────────
