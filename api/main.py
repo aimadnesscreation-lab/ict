@@ -176,7 +176,7 @@ def _build_ws_payload() -> dict:
         "max_weekly_loss_pct": 6.0,
         "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            _demo_account.daily_loss
+            max(0, -_demo_account._daily_pnl)
             / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
             * MAX_DAILY_LOSS_PCT
             if MAX_DAILY_LOSS_PCT > 0 else 0, 2
@@ -236,7 +236,7 @@ async def lifespan(app: FastAPI):
     try:
         last_state = await _db.load_last_state()
         db_positions = await _db.load_positions()
-        db_trades = await _db.load_trades()
+        db_trades = await _db.get_recent_trades(limit=500)
         
         if last_state:
             _demo_account.restore_state(
@@ -396,13 +396,15 @@ async def _crypto_data_worker():
         while True:
             try:
                 tickers = await exchange.watch_tickers(SYMBOLS)
-                for symbol in SYMBOLS:
-                    if symbol in tickers:
-                        t = tickers[symbol]
+                # watch_tickers returns keys in unified format (e.g. "BTC/USDT")
+                # but our SYMBOLS use raw format (e.g. "BTCUSDT")
+                for unified_symbol, t in tickers.items():
+                    raw = unified_symbol.replace("/", "").upper()
+                    if raw in SYMBOLS:
                         price = float(t["last"])
-                        _latest_prices[symbol] = price
-                        _latest_ticks[symbol] = {
-                            "symbol": symbol,
+                        _latest_prices[raw] = price
+                        _latest_ticks[raw] = {
+                            "symbol": raw,
                             "price": price,
                             "change_24h": round(float(t.get("percentage", 0) or 0), 2),
                             "high_24h": float(t.get("high", price) or price),
@@ -416,6 +418,7 @@ async def _crypto_data_worker():
 
     async def handle_ohlcv(symbol: str):
         """Watch real-time OHLCV candles and detect closes."""
+        global _recent_signals, _recent_trades, _performance_cache
         while True:
             try:
                 # watchOHLCV returns a list of [timestamp, open, high, low, close, volume]
@@ -878,7 +881,7 @@ async def get_diagnostics():
             "total_trades": len(_recent_trades),
         },
         "risk": {
-            "daily_loss_pct": round(_demo_account.daily_loss / _demo_account.initial_balance * 100, 2),
+            "daily_loss_pct": round(max(0, -_demo_account._daily_pnl) / _demo_account.initial_balance * 100, 2),
             "open_positions": len(_demo_account.open_positions),
         }
     }
@@ -962,7 +965,7 @@ async def get_risk_status():
         "max_weekly_loss_pct": 6.0,
         "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            _demo_account.daily_loss
+            max(0, -_demo_account._daily_pnl)
             / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
             * MAX_DAILY_LOSS_PCT
             if MAX_DAILY_LOSS_PCT > 0 else 0, 2

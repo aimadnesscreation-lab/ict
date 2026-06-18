@@ -306,6 +306,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         sl_multiplier=0.5,
         reentry_cooldown_minutes=0,
         symbol_min_scores={symbol.upper(): symbol_min_score},
+        spot_only=spot,
     )
 
     signals_gen = 0
