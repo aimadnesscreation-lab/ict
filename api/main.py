@@ -1191,7 +1191,7 @@ async def get_health():
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     uptime = now
     if _health.get("started_at"):
-        started = datetime.fromisoformat(_health["started_at"].replace("Z", ""))
+        started = datetime.fromisoformat(_health["started_at"].replace("Z", "+00:00"))
         uptime_secs = (datetime.now(timezone.utc) - started).total_seconds()
         uptime = f"{uptime_secs / 60:.0f}m {uptime_secs % 60:.0f}s"
 
