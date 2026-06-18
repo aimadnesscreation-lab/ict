@@ -10,6 +10,7 @@ dashboard/dist/
 postgres_data/
 ml_engine/models/
 session.md
+trading.db
 debug_trades_*.json
 *.md
 !README.md
