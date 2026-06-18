@@ -84,6 +84,15 @@ class DemoAccount:
         # Track last stop-loss for each symbol to prevent rapid re-entry
         self._last_sl: Dict[str, Dict] = {}  # {symbol: {"time": datetime, "side": str}}
 
+    @property
+    def daily_loss(self) -> float:
+        """Return the absolute daily P&L (always positive) for API display.
+
+        Internal circuit breaker logic uses `_daily_pnl` directly (negative when
+        losing) so the max_daily_loss_pct limit works correctly.
+        """
+        return abs(self._daily_pnl)
+
     # ── Public API ────────────────────────────────────────────────────
 
     def process_signals(self, signals: List[Dict], current_prices: Dict[str, float],

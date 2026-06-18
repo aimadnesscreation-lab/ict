@@ -176,7 +176,7 @@ def _build_ws_payload() -> dict:
         "max_weekly_loss_pct": 6.0,
         "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            max(0, -_demo_account._daily_pnl)
+            _demo_account.daily_loss
             / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
             * MAX_DAILY_LOSS_PCT
             if MAX_DAILY_LOSS_PCT > 0 else 0, 2
@@ -881,7 +881,7 @@ async def get_diagnostics():
             "total_trades": len(_recent_trades),
         },
         "risk": {
-            "daily_loss_pct": round(max(0, -_demo_account._daily_pnl) / _demo_account.initial_balance * 100, 2),
+            "daily_loss_pct": round(_demo_account.daily_loss / _demo_account.initial_balance * 100, 2),
             "open_positions": len(_demo_account.open_positions),
         }
     }
@@ -965,7 +965,7 @@ async def get_risk_status():
         "max_weekly_loss_pct": 6.0,
         "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            max(0, -_demo_account._daily_pnl)
+            _demo_account.daily_loss
             / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
             * MAX_DAILY_LOSS_PCT
             if MAX_DAILY_LOSS_PCT > 0 else 0, 2

@@ -21,13 +21,29 @@ A production-grade algorithmic trading platform built on **ICT (Inner Circle Tra
 
 | Metric | BTCUSDT | ETHUSDT | **Combined** |
 |--------|---------|---------|-------------|
-| **Total Trades** | 840 | 1,413 | **2,253** |
-| **Win Rate** | 38.7% | 38.6% | **38.6%** |
-| **Total P&L** | +$7,012.73 | +$12,252.21 | **+$19,264.94** |
-| **Total Return** | — | — | **+385.3%** |
-| **Avg Monthly P&L** | $584.39 | $1,021.02 | **$1,605.41** |
-| **Avg R:R** | 1.39 | 1.38 | **1.38** |
-| **Avg Max DD** | 9.5% | 9.6% | **~9.5%** |
+| **Total Trades** | 470 | 846 | **1,316** |
+| **Win Rate** | 41.9% | 38.4% | **39.7%** |
+| **Total P&L** | +$6,413.58 | +$6,919.30 | **+$13,332.88** |
+| **Total Return** | — | — | **+266.7%** |
+| **Avg Monthly P&L** | $534.47 | $576.61 | **$1,111.07** |
+| **Avg R:R** | 1.42 | 1.38 | **1.40** |
+| **Avg Max DD** | 8.0% | 7.6% | **~7.8%** |
+
+*Run: `python backtest_okx.py --months 12 --spot --capital 5000`*
+
+### Futures-Enabled (LONG + SHORT — Binance Futures) — 12 Months
+
+| Metric | BTCUSDT | ETHUSDT | **Combined** |
+|--------|---------|---------|-------------|
+| **Total Trades** | 1,012 | 1,648 | **2,660** |
+| **Win Rate** | 41.1% | 38.2% | **38.2%** |
+| **Total P&L** | +$8,267.58 | +$14,023.60 | **+$22,291.12** |
+| **Total Return** | — | — | **+445.8%** |
+| **Avg Monthly P&L** | $688.97 | $1,168.63 | **$1,857.59** |
+| **Avg R:R** | 1.40 | 1.38 | **1.39** |
+| **Avg Max DD** | 13.6% | 10.9% | **~12.3%** |
+
+*Run: `python backtest_okx.py --months 12 --capital 5000`*
 
 ---
 
