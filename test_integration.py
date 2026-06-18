@@ -15,10 +15,8 @@ Usage:
 
 import asyncio
 import httpx
-import json
 import os
 import sys
-import signal
 import time
 
 sys.path.insert(0, os.path.dirname(__file__))

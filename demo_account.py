@@ -16,7 +16,7 @@ Rules:
 
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from loguru import logger
 
 

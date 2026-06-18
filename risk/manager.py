@@ -1,5 +1,5 @@
 from loguru import logger
-from typing import Dict, Optional
+from typing import Optional
 
 class RiskManager:
     def __init__(self, 

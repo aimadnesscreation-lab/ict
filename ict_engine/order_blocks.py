@@ -1,5 +1,4 @@
 import polars as pl
-from typing import Optional
 from .utils import calculate_atr
 
 class OrderBlockDetector:

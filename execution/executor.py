@@ -14,11 +14,9 @@ Usage:
 """
 
 import os
-import asyncio
 import ccxt.pro as ccxt
 from loguru import logger
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -65,11 +63,10 @@ class LiveExecutor:
       - amount precision: BTC=0.00001, ETH=0.001
     """
 
-    def __init__(self, mode: str = "demo", leverage: int = 1):
+    def __init__(self, mode: str = "demo"):
         self.mode = mode.lower()
         self.exchange_name = os.getenv("EXCHANGE_NAME", "binance").lower()
         self._markets_loaded = False
-        self.leverage = leverage  # ignored for spot, kept for interface compatibility
 
         # Load credentials based on exchange
         if self.exchange_name == "binance":
@@ -130,13 +127,6 @@ class LiveExecutor:
             self._markets_loaded = True
         except Exception as e:
             logger.warning(f"Execution: Failed to load markets: {e}")
-
-    async def _set_leverage(self, symbol: str):
-        """
-        No-op for spot trading — spot has no leverage.
-        Kept for interface compatibility.
-        """
-        pass
 
     def _get_market_precision(self, symbol: str) -> Tuple[float, float, float]:
         """Get amount precision, min amount, and max amount for a symbol.

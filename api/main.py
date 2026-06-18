@@ -4,7 +4,6 @@ from typing import List, Dict, Optional
 from datetime import datetime, timezone
 import random
 import os
-import time
 import asyncio
 import json
 import httpx
@@ -91,7 +90,6 @@ _demo_account = DemoAccount(
 
 _live_executor = LiveExecutor(
     mode=os.getenv("EXCHANGE_MODE", "demo"),
-    leverage=int(os.getenv("LEVERAGE", "10")),
 )
 
 # ── Binance crypto data ──────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import polars as pl
-from typing import List, Dict, Optional
+from typing import Optional
 
 class LiquidityDetector:
     """

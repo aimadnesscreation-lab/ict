@@ -6,7 +6,7 @@ No VPN/proxy needed — Discord uses standard HTTPS.
 
 import httpx
 from loguru import logger
-from typing import Dict, Optional
+from typing import Dict
 
 
 class DiscordBot:

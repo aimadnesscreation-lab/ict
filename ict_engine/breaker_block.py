@@ -14,7 +14,6 @@ strong continuation moves.
 """
 
 import polars as pl
-from typing import List, Dict, Optional
 
 
 class BreakerBlockDetector:
