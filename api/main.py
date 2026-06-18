@@ -23,16 +23,25 @@ load_dotenv()
 # ── Imports ──────────────────────────────────────────────────────────
 from ict_engine.market_structure import MarketStructure
 from signal_engine.engine import determine_bias_from_ema, determine_bias_from_swings
-from risk.manager import RiskManager
 from discord.bot import DiscordBot
 from demo_account import DemoAccount
 from execution.executor import LiveExecutor
 from trading_engine.orchestrator import TradingOrchestrator
+from database.manager import DatabaseManager
+
+# ── Database ─────────────────────────────────────────────────────────
+_db = DatabaseManager()
 
 # ── App state ────────────────────────────────────────────────────────
 _recent_signals: List[Dict] = []
 _recent_trades: List[Dict] = []
 _performance_cache: Dict = {}
+
+# Risk Settings
+MAX_RISK_PER_TRADE_PCT = 1.0
+MAX_DAILY_LOSS_PCT = 3.0
+MAX_OPEN_POSITIONS = 3
+DEMO_INITIAL_BALANCE = float(os.getenv("DEMO_INITIAL_BALANCE", "5000"))
 
 _health: Dict = {
     "status": "starting",
@@ -53,16 +62,10 @@ _health: Dict = {
     },
 }
 
-risk_manager = RiskManager(
-    max_risk_per_trade_pct=1.0, max_daily_loss_pct=3.0, max_open_positions=3,
-)
-
-DEMO_INITIAL_BALANCE = float(os.getenv("DEMO_INITIAL_BALANCE", "5000"))
-
 _demo_account = DemoAccount(
-    initial_balance=DEMO_INITIAL_BALANCE, risk_per_trade_pct=1.0,
-    max_daily_loss_pct=risk_manager.max_daily_loss_pct,
-    max_open_positions=risk_manager.max_open_positions,
+    initial_balance=DEMO_INITIAL_BALANCE, risk_per_trade_pct=MAX_RISK_PER_TRADE_PCT,
+    max_daily_loss_pct=MAX_DAILY_LOSS_PCT,
+    max_open_positions=MAX_OPEN_POSITIONS,
     sl_multiplier=1.5,
     reentry_cooldown_minutes=0,
     symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
@@ -167,21 +170,20 @@ def _build_ws_payload() -> dict:
     health["eth_price"] = _latest_prices.get("ETHUSDT", 0)
 
     # Risk status
-    demo_balance = _demo_account.balance if hasattr(_demo_account, 'balance') else DEMO_INITIAL_BALANCE
     risk_status = {
-        "max_risk_per_trade_pct": risk_manager.max_risk_per_trade_pct,
-        "max_daily_loss_pct": risk_manager.max_daily_loss_pct,
+        "max_risk_per_trade_pct": MAX_RISK_PER_TRADE_PCT,
+        "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
         "max_weekly_loss_pct": 6.0,
-        "max_open_positions": risk_manager.max_open_positions,
+        "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            risk_manager.current_daily_loss
-            / (DEMO_INITIAL_BALANCE * risk_manager.max_daily_loss_pct / 100)
-            * risk_manager.max_daily_loss_pct
-            if risk_manager.max_daily_loss_pct > 0 else 0, 2
+            _demo_account.daily_loss
+            / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
+            * MAX_DAILY_LOSS_PCT
+            if MAX_DAILY_LOSS_PCT > 0 else 0, 2
         ),
         "current_weekly_loss_pct": 0.0,
-        "open_positions_count": risk_manager.open_positions_count,
-        "account_balance": demo_balance,
+        "open_positions_count": len(_demo_account.open_positions),
+        "account_balance": _demo_account.balance,
     }
 
     # Performance metrics
@@ -222,9 +224,6 @@ async def _broadcast_data():
 
 
 # ── Lifespan ─────────────────────────────────────────────────────────
-
-from database.manager import DatabaseManager
-_db = DatabaseManager()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -334,35 +333,6 @@ async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Opt
         return None
 
 
-async def _binance_fetch_ticker(symbol: str) -> Optional[Dict]:
-    """Fetch live ticker from Binance 24hr ticker endpoint.
-    Public endpoint — no API key needed.
-    """
-    url = "https://api.binance.com/api/v3/ticker/24hr"
-    params = {"symbol": symbol}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            if not isinstance(data, dict):
-                return None
-            last = float(data.get("lastPrice", 0))
-            return {
-                "price": last,
-                "change_24h": round(float(data.get("priceChangePercent", 0)), 2),
-                "high_24h": float(data.get("highPrice", last)),
-                "low_24h": float(data.get("lowPrice", last)),
-                "volume": round(float(data.get("volume", 0)), 2),
-            }
-    except Exception as e:
-        logger.debug(f"[Binance] Ticker fetch failed for {symbol}: {e}")
-        return None
-
-
-# ── Candle buffer helpers ────────────────────────────────────────────
-
 def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
     idx = df.with_row_index().with_columns((pl.col("index") // 3).alias("_g"))
     return idx.group_by("_g", maintain_order=True).agg([
@@ -393,24 +363,6 @@ async def _backfill_buffers():
             logger.warning(f"[Crypto] Data backfill failed for {symbol}, starting empty")
             _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
             _candle_buffers.setdefault(symbol, {}).setdefault("15m", [])
-
-
-def _buffer_to_df(symbol: str, tf: str) -> pl.DataFrame:
-    buf = _candle_buffers.get(symbol, {}).get(tf, [])
-    if len(buf) < 10:
-        return pl.DataFrame()
-    return pl.DataFrame(buf)
-
-
-def _append_to_buffer(symbol: str, tf: str, candle: Dict):
-    buf = _candle_buffers.setdefault(symbol, {}).setdefault(tf, [])
-    if buf and buf[-1]["timestamp"] == candle["timestamp"]:
-        buf[-1] = candle
-    else:
-        buf.append(candle)
-    limit = BUFFER_LIMITS.get(tf, 288)
-    if len(buf) > limit:
-        buf[:] = buf[-limit:]
 
 
 # ── Background Workers ───────────────────────────────────────────────
@@ -926,8 +878,8 @@ async def get_diagnostics():
             "total_trades": len(_recent_trades),
         },
         "risk": {
-            "daily_loss_pct": _performance_cache.get("current_drawdown_pct", 0),
-            "open_positions": _health.get("total_trades_executed", 0),
+            "daily_loss_pct": round(_demo_account.daily_loss / _demo_account.initial_balance * 100, 2),
+            "open_positions": len(_demo_account.open_positions),
         }
     }
 
@@ -1004,21 +956,20 @@ async def trigger_sync():
 
 @app.get("/risk/status")
 async def get_risk_status():
-    demo_balance = _demo_account.balance if hasattr(_demo_account, 'balance') else DEMO_INITIAL_BALANCE
     return {
-        "max_risk_per_trade_pct": risk_manager.max_risk_per_trade_pct,
-        "max_daily_loss_pct": risk_manager.max_daily_loss_pct,
+        "max_risk_per_trade_pct": MAX_RISK_PER_TRADE_PCT,
+        "max_daily_loss_pct": MAX_DAILY_LOSS_PCT,
         "max_weekly_loss_pct": 6.0,
-        "max_open_positions": risk_manager.max_open_positions,
+        "max_open_positions": MAX_OPEN_POSITIONS,
         "current_daily_loss_pct": round(
-            risk_manager.current_daily_loss
-            / (DEMO_INITIAL_BALANCE * risk_manager.max_daily_loss_pct / 100)
-            * risk_manager.max_daily_loss_pct
-            if risk_manager.max_daily_loss_pct > 0 else 0, 2
+            _demo_account.daily_loss
+            / (DEMO_INITIAL_BALANCE * MAX_DAILY_LOSS_PCT / 100)
+            * MAX_DAILY_LOSS_PCT
+            if MAX_DAILY_LOSS_PCT > 0 else 0, 2
         ),
         "current_weekly_loss_pct": 0.0,
-        "open_positions_count": risk_manager.open_positions_count,
-        "account_balance": demo_balance,
+        "open_positions_count": len(_demo_account.open_positions),
+        "account_balance": _demo_account.balance,
     }
 
 
