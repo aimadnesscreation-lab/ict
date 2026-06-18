@@ -295,7 +295,7 @@ class TradingOrchestrator:
 
     # ── Reset ────────────────────────────────────────────────────────
 
-    def reset_all(self, initial_balance: float = 5000.0):
+    async def reset_all(self, initial_balance: float = 5000.0):
         """Reset DemoAccount, caches, and counters to start fresh."""
         self.demo.open_positions.clear()
         self.demo.closed_trades.clear()
@@ -305,6 +305,10 @@ class TradingOrchestrator:
         self.demo._daily_pnl = 0.0
         self.demo._last_sl.clear()
         self.demo._last_trade_date = datetime.now(timezone.utc).date()
+
+        # Clear DB
+        if self.demo.db:
+            await self.demo.db.clear_all_data()
 
         self.total_signals_generated = 0
         self.total_signals_kept = 0

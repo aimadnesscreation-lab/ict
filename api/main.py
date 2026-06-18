@@ -913,7 +913,7 @@ async def get_health():
 
 @app.post("/reset")
 async def reset_all():
-    _orchestrator.reset_all(initial_balance=DEMO_INITIAL_BALANCE)
+    await _orchestrator.reset_all(initial_balance=DEMO_INITIAL_BALANCE)
 
     global _recent_signals, _recent_trades, _performance_cache
     _recent_signals = []

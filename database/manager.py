@@ -115,11 +115,23 @@ class DatabaseManager:
             result = await session.execute(select(DBPosition))
             return [dict(r._mapping['DBPosition'].__dict__) for r in result.all()]
 
-    async def load_trades(self, limit=500) -> List[Dict]:
+    async def get_recent_trades(self, limit=200) -> List[Dict]:
         from sqlalchemy import select
         async with self.async_session() as session:
             result = await session.execute(select(DBTrade).order_by(DBTrade.exit_time.desc()).limit(limit))
             return [dict(r._mapping['DBTrade'].__dict__) for r in result.all()]
+
+    async def clear_all_data(self):
+        """Wipe all tables for a fresh start."""
+        from sqlalchemy import delete
+        async with self.async_session() as session:
+            await session.execute(delete(DBTrade))
+            await session.execute(delete(DBSignal))
+            await session.execute(delete(DBPosition))
+            await session.execute(delete(DBAccountState))
+            await session.commit()
+        logger.info("Database: All tables wiped for fresh start.")
+
 
     async def load_last_state(self) -> Optional[Dict]:
         from sqlalchemy import select
