@@ -110,14 +110,14 @@ fi
 
 # ── Step 5: Quick connection test ────────────────────────────
 info "Running connection test..."
-if python test_live_connection.py 2>&1 | grep -q "ALL 15 TESTS PASSED"; then
+if python test_live_connection.py 2>&1 | grep -q "✅ ALL"; then
     ok "Binance demo connection verified"
 else
-    warn "Connection test failed — check your .env credentials."
+    warn "Connection test did not pass all checks — check your .env credentials."
     warn "The server will start but exchange execution may not work."
 fi
 
-# ── Step 5: Check port availability ────────────────────────────
+# ── Step 6: Check port availability ────────────────────────────
 if command -v lsof &>/dev/null; then
     if lsof -ti:8000 &>/dev/null; then
         err "Port 8000 is already in use. Stop the existing process and try again."
@@ -148,7 +148,7 @@ cleanup() {
 }
 trap cleanup SIGINT SIGTERM
 
-# ── Step 6: Start API server ────────────────────────────────
+# ── Step 7: Start API server ────────────────────────────────
 echo ""
 info "Starting API server (uvicorn api.main:app)..."
 uvicorn api.main:app --host 0.0.0.0 --port 8000 &
@@ -175,7 +175,7 @@ else
     warn "API server may not be ready yet. Check http://localhost:8000/api/health"
 fi
 
-# ── Step 7: Start dashboard ─────────────────────────────────
+# ── Step 8: Start dashboard ─────────────────────────────────
 if [ -d "dashboard" ]; then
     info "Starting dashboard (Vite dev server)..."
     cd dashboard
