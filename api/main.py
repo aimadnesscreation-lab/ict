@@ -529,6 +529,87 @@ async def _fetch_candles(symbol: str, bar: str, limit: int = 288) -> Optional[Li
     return None
 
 
+# ── Live ticker fetchers (live price every 15s, not candle close) ─────
+
+async def _okx_fetch_ticker(symbol: str) -> Optional[Dict]:
+    """Fetch live ticker (last price, 24h change) from OKX REST API.
+
+    Public endpoint — no API key needed.
+    Returns dict with: price, change_24h, high_24h, low_24h, volume (base currency)
+    """
+    inst_id = OKX_SYMBOL_MAP.get(symbol)
+    if not inst_id:
+        return None
+    url = "https://www.okx.com/api/v5/market/ticker"
+    params = {"instId": inst_id}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("code") != "0":
+                return None
+            tickers = data.get("data", [])
+            if not tickers:
+                return None
+            t = tickers[0]
+            last = float(t.get("last", 0))
+            open24h = float(t.get("open24h", 0))
+            change_pct = round((last - open24h) / open24h * 100, 2) if open24h > 0 else 0.0
+            return {
+                "price": last,
+                "change_24h": change_pct,
+                "high_24h": float(t.get("high24h", last)),
+                "low_24h": float(t.get("low24h", last)),
+                "volume": round(float(t.get("vol24h", 0)), 2),  # base currency volume (matches Binance)
+            }
+    except Exception as e:
+        logger.debug(f"[OKX] Ticker fetch failed for {symbol}: {e}")
+        return None
+
+
+async def _binance_fetch_ticker(symbol: str) -> Optional[Dict]:
+    """Fetch live ticker from Binance 24hr ticker endpoint.
+
+    Public endpoint — no API key needed.
+    Returns dict with: price, change_24h, high_24h, low_24h, volume
+    """
+    url = "https://api.binance.com/api/v3/ticker/24hr"
+    params = {"symbol": symbol}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(url, params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            last = float(data.get("lastPrice", 0))
+            return {
+                "price": last,
+                "change_24h": round(float(data.get("priceChangePercent", 0)), 2),
+                "high_24h": float(data.get("highPrice", last)),
+                "low_24h": float(data.get("lowPrice", last)),
+                "volume": round(float(data.get("volume", 0)), 2),
+            }
+    except Exception as e:
+        logger.debug(f"[Binance] Ticker fetch failed for {symbol}: {e}")
+        return None
+
+
+async def _fetch_ticker(symbol: str) -> Optional[Dict]:
+    """Fetch live ticker from any available source.
+
+    Tries OKX first, falls back to Binance.
+    Returns dict with: price, change_24h, high_24h, low_24h, volume
+    """
+    ticker = await _okx_fetch_ticker(symbol)
+    if ticker:
+        return ticker
+    return await _binance_fetch_ticker(symbol)
+
+
 async def _crypto_data_worker():
     """
     Crypto data worker: primary source is OKX REST API (15s polling, no API key needed).
@@ -598,15 +679,33 @@ async def _crypto_data_worker():
             await asyncio.sleep(15)
 
             for symbol in BINANCE_SYMBOLS:
+                # ── Step 1: Fetch live ticker (live market price, updated every 15s) ──
+                ticker = await _fetch_ticker(symbol)
+                if ticker and ticker["price"] > 0:
+                    _latest_prices[symbol] = ticker["price"]
+                    _latest_ticks[symbol] = {
+                        "symbol": symbol,
+                        "price": ticker["price"],
+                        "change_24h": ticker["change_24h"],
+                        "high_24h": ticker["high_24h"],
+                        "low_24h": ticker["low_24h"],
+                        "volume": ticker["volume"],
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+
+                # ── Step 2: Fetch OHLCV candles for ICT analysis ──
                 candles = await _fetch_candles(symbol, "5m", 288)
                 if not candles:
-                    logger.warning(f"[Crypto] Data fetch failed for {symbol}, skipping...")
+                    logger.warning(f"[Crypto] Candle fetch failed for {symbol}, skipping...")
                     continue
 
                 # Reverse so newest is last
                 candles_sorted = sorted(candles, key=lambda c: c["timestamp"])
                 last = candles_sorted[-1]
-                _latest_prices[symbol] = last["close"]
+
+                # Only update _latest_prices from candles if ticker fetch failed
+                if not ticker or ticker["price"] <= 0:
+                    _latest_prices[symbol] = last["close"]
 
                 # Only process when a new confirmed (closed) candle appears
                 confirmed = [c for c in candles_sorted if c.get("confirmed", True)]
@@ -629,11 +728,12 @@ async def _crypto_data_worker():
                          "high": r["high"], "low": r["low"], "close": r["close"],
                          "volume": r["volume"]} for r in df_15m.to_dicts()
                     ]
-                    # Update tick
-                    _latest_ticks[symbol] = {"symbol": symbol, "price": last["close"],
-                        "change_24h": 0.0, "high_24h": last["high"],
-                        "low_24h": last["low"], "volume": round(last["volume"], 2),
-                        "timestamp": datetime.utcnow().isoformat() + "Z"}
+                    # Fallback tick update if ticker fetch failed (uses candle close)
+                    if not ticker or ticker["price"] <= 0:
+                        _latest_ticks[symbol] = {"symbol": symbol, "price": last["close"],
+                            "change_24h": 0.0, "high_24h": last["high"],
+                            "low_24h": last["low"], "volume": round(last["volume"], 2),
+                            "timestamp": datetime.utcnow().isoformat() + "Z"}
                     # Run analysis
                     logger.info(f"[Crypto] {symbol} 5m: new candle @ {last['close']}")
                     await _run_crypto_analysis(symbol, "5m")

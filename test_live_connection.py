@@ -73,9 +73,9 @@ async def test_connection():
         # ── 3. Test Symbol Format ────────────────────────────────────
         print("\n  Step 3: Verifying symbol conversion...")
         test_cases = [
-            ("BTCUSDT", "BTC/USDT:USDT"),
-            ("ETHUSDT", "ETH/USDT:USDT"),
-            ("DOGEUSDT", "DOGE/USDT:USDT"),
+            ("BTCUSDT", "BTC/USDT"),
+            ("ETHUSDT", "ETH/USDT"),
+            ("DOGEUSDT", "DOGE/USDT"),
         ]
         for raw, expected in test_cases:
             result = normalize_symbol(raw)

@@ -25,41 +25,51 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+# Symbols tracked by the executor (matches api/main.py TRACKED_SYMBOLS)
+TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+
+
 def normalize_symbol(symbol: str) -> str:
-    """Convert raw symbol (e.g. BTCUSDT) to CCXT unified futures format.
-    
-    Handles any symbol length: BTCUSDT → BTC/USDT:USDT, ETHUSDT → ETH/USDT:USDT, etc.
-    This is length-agnostic — strips the trailing 'USDT' suffix.
+    """Convert raw symbol (e.g. BTCUSDT) to CCXT spot unified format.
+
+    Spot format: BTCUSDT → BTC/USDT (no :USDT suffix, unlike futures).
+    Handles any symbol length — strips the trailing 'USDT' suffix.
     """
     if symbol.endswith("USDT"):
         base = symbol[:-4]  # Remove 'USDT' suffix
     else:
         base = symbol  # fallback
-    return f"{base}/USDT:USDT"
+    return f"{base}/USDT"
 
 
 def denormalize_symbol(market_symbol: str) -> str:
-    """Convert CCXT unified symbol back to raw format (e.g. BTC/USDT:USDT → BTCUSDT)."""
+    """Convert CCXT unified symbol back to raw format (e.g. BTC/USDT or BTC/USDT:USDT → BTCUSDT)."""
     base = market_symbol.split("/")[0]
     return f"{base}USDT"
 
 
 class LiveExecutor:
     """
-    Generic Live Execution Engine.
-    Supports Binance (Demo Trading Portal + Testnet) and OKX.
-    
-    For Binance USDT-M Futures:
+    Live Execution Engine — Spot Trading.
+
+    Supports Binance Spot (Demo Trading Portal + Testnet) and OKX Spot.
+    Uses market orders for entry, with attached stop-loss and take-profit orders.
+
+    IMPORTANT: Spot trading only supports LONG positions. SHORT signals are
+    skipped with a warning. For SHORT positions, margin or futures would be
+    needed (not currently implemented).
+
+    For Binance Spot:
       - quantity is in base currency (e.g. BTC for BTC/USDT)
-      - contractSize is 1.0 (1 contract = 1 unit of base currency)
-      - amount precision: BTC=0.0001, ETH=0.001
+      - No leverage (spot trades 1:1)
+      - amount precision: BTC=0.00001, ETH=0.001
     """
 
-    def __init__(self, mode: str = "demo", leverage: int = 10):
+    def __init__(self, mode: str = "demo", leverage: int = 1):
         self.mode = mode.lower()
         self.exchange_name = os.getenv("EXCHANGE_NAME", "binance").lower()
         self._markets_loaded = False
-        self.leverage = leverage
+        self.leverage = leverage  # ignored for spot, kept for interface compatibility
 
         # Load credentials based on exchange
         if self.exchange_name == "binance":
@@ -76,14 +86,14 @@ class LiveExecutor:
             self.exchange = None
             return
 
-        # Initialize CCXT instance
+        # Initialize CCXT instance — always spot mode
         exchange_class = getattr(ccxt, self.exchange_name)
         config = {
             'apiKey': self.api_key,
             'secret': self.secret,
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'future' if self.exchange_name == "binance" else 'swap',
+                'defaultType': 'spot',
             }
         }
         if self.passphrase:
@@ -98,16 +108,16 @@ class LiveExecutor:
                 self.exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
                 if hasattr(self.exchange, 'enable_demo_trading'):
                     self.exchange.enable_demo_trading(True)
-                    logger.info("Execution: Binance Demo Trading Portal enabled.")
+                    logger.info("Execution: Binance Demo Trading Portal enabled (Spot).")
                 else:
                     # Fallback to legacy testnet
                     self.exchange.set_sandbox_mode(True)
-                    logger.info("Execution: Binance Testnet mode enabled (fallback).")
+                    logger.info("Execution: Binance Testnet mode enabled (Spot, fallback).")
             else:
                 self.exchange.set_sandbox_mode(True)
-                logger.info(f"Execution: Initialized in {self.exchange_name.upper()} DEMO mode.")
+                logger.info(f"Execution: Initialized in {self.exchange_name.upper()} SPOT DEMO mode.")
         else:
-            logger.info(f"Execution: Initialized in {self.exchange_name.upper()} LIVE mode.")
+            logger.info(f"Execution: Initialized in {self.exchange_name.upper()} SPOT LIVE mode.")
 
     # ── Market Info ───────────────────────────────────────────────────
 
@@ -123,26 +133,10 @@ class LiveExecutor:
 
     async def _set_leverage(self, symbol: str):
         """
-        Set leverage for a specific symbol on Binance futures.
-        Must be called after _ensure_markets() so exchange is ready.
-        Uses cross-margin mode by default.
+        No-op for spot trading — spot has no leverage.
+        Kept for interface compatibility.
         """
-        if not self.exchange or not self._markets_loaded:
-            return
-        try:
-            market_symbol = normalize_symbol(symbol)
-            if self.exchange_name == "binance":
-                await self.exchange.set_leverage(self.leverage, market_symbol)
-                # Also set margin mode to cross
-                try:
-                    await self.exchange.set_margin_mode('cross', market_symbol)
-                except Exception:
-                    pass  # May already be cross, ignore
-            else:
-                await self.exchange.set_leverage(self.leverage, market_symbol)
-            logger.info(f"Execution: Leverage set to {self.leverage}x ({'cross'}) for {market_symbol}")
-        except Exception as e:
-            logger.warning(f"Execution: Failed to set leverage for {symbol}: {e}")
+        pass
 
     def _get_market_precision(self, symbol: str) -> Tuple[float, float, float]:
         """Get amount precision, min amount, and max amount for a symbol.
@@ -210,33 +204,54 @@ class LiveExecutor:
     # ── Positions ────────────────────────────────────────────────────
 
     async def get_open_positions(self) -> List[Dict]:
-        """Return all open positions from the exchange (non-zero contracts)."""
+        """Return all open positions from the exchange.
+
+        SPOT: Checks balance of base assets for tracked symbols.
+        A "position" is simply a non-zero free balance of the base asset.
+        """
         if not self.exchange:
             return []
         try:
-            positions = await self.exchange.fetch_positions()
-            return [
-                p for p in positions
-                if float(p.get('contracts', 0) or p.get('size', 0)) != 0
-            ]
+            balance = await self.exchange.fetch_balance()
+            positions = []
+            for raw_symbol in TRACKED_SYMBOLS:
+                base = raw_symbol.replace('USDT', '')
+                free = float(balance.get(base, {}).get('free', 0))
+                total = float(balance.get(base, {}).get('total', 0))
+                if total > 0:
+                    positions.append({
+                        'symbol': normalize_symbol(raw_symbol),
+                        'contracts': total,
+                        'size': total,
+                        'side': 'long',
+                        'entryPrice': 0.0,  # Spot doesn't track entry price via balance
+                        'unrealizedPnl': 0.0,
+                    })
+            return positions
         except Exception as e:
-            logger.error(f"Execution: Failed to fetch positions: {e}")
+            logger.error(f"Execution: Failed to fetch spot positions: {e}")
             return []
 
     async def has_position(self, symbol: str) -> bool:
         """Check if the exchange has an open position for a given symbol.
-        
+
+        SPOT: Checks if the free balance of the base asset is > 0.
+
         Args:
             symbol: Raw symbol like 'BTCUSDT'
         Returns:
-            True if there's an open position with non-zero size
+            True if we hold a non-zero balance of the base asset
         """
-        positions = await self.get_open_positions()
-        market_symbol = normalize_symbol(symbol)
-        for p in positions:
-            if p.get('symbol') == market_symbol:
-                return True
-        return False
+        if not self.exchange:
+            return False
+        try:
+            balance = await self.exchange.fetch_balance()
+            base = symbol.replace('USDT', '')
+            free = float(balance.get(base, {}).get('free', 0))
+            return free > 0
+        except Exception as e:
+            logger.error(f"Execution: has_position failed for {symbol}: {e}")
+            return False
 
     async def get_position_for_symbol(self, symbol: str) -> Optional[Dict]:
         """Get the open position for a specific symbol, or None if not found."""
@@ -259,11 +274,19 @@ class LiveExecutor:
         tp: float,
     ) -> Optional[Dict]:
         """
-        Place Market order with attached Stop Loss and Take Profit on Binance Futures.
+        Place Spot Market order with attached Stop Loss and Take Profit.
+
+        SPOT LIMITATION: Only LONG positions are supported on spot markets.
+        SHORT signals are skipped with a warning.
+
+        For LONG positions, we:
+          1. Market buy the base asset
+          2. Place a STOP_LOSS sell order (triggers market sell when stop price hit)
+          3. Place a TAKE_PROFIT sell order (triggers market sell when TP price hit)
 
         Args:
             symbol: Raw symbol like 'BTCUSDT'
-            side: 'LONG' or 'SHORT'
+            side: 'LONG' or 'SHORT' (SHORT is skipped on spot)
             qty: Quantity in base currency (e.g. BTC for BTC/USDT)
             price: Current market price (for reference/logging)
             sl: Stop-loss price
@@ -275,13 +298,15 @@ class LiveExecutor:
         if not self.exchange:
             return None
 
+        # Spot can only go LONG
+        if side.upper() != "LONG":
+            logger.info(f"Execution: Skipping {side} {symbol} — spot trading only supports LONG")
+            return None
+
         # Ensure markets are loaded for precision/limits
         await self._ensure_markets()
 
-        # Set the configured leverage for this symbol before placing orders
-        await self._set_leverage(symbol)
-
-        # Convert to CCXT unified symbol
+        # Convert to CCXT unified spot symbol
         market_symbol = normalize_symbol(symbol)
 
         # Validate and round quantity
@@ -290,51 +315,46 @@ class LiveExecutor:
             logger.warning(f"Execution: Invalid quantity {qty} for {symbol} after rounding")
             return None
 
-        order_side = 'buy' if side.upper() == "LONG" else 'sell'
-        sl_side = 'sell' if side.upper() == "LONG" else 'buy'
-
         try:
             logger.info(
-                f"Execution: Opening {side} {market_symbol} qty={amount} "
+                f"Execution: Opening LONG {market_symbol} qty={amount} "
                 f"SL={sl} TP={tp}"
             )
 
-            # 1. Entry Market Order
+            # 1. Entry Market Order (buy base asset with USDT)
             entry = await self.exchange.create_order(
                 symbol=market_symbol,
                 type='market',
-                side=order_side,
+                side='buy',
                 amount=amount,
             )
 
-            # 2. Stop Loss (stop_market for Binance, reduceOnly)
+            # 2. Stop Loss — triggers a market sell when price drops to SL
+            # Binance spot STOP_LOSS becomes a market order when stopPrice is hit
             await self.exchange.create_order(
                 symbol=market_symbol,
-                type='stop_market',
-                side=sl_side,
+                type='stop_loss',
+                side='sell',
                 amount=amount,
                 params={
                     'stopPrice': sl,
-                    'reduceOnly': True,
-                    'workingType': 'MARK_PRICE',
                 },
             )
 
-            # 3. Take Profit (take_profit_market for Binance, reduceOnly)
+            # 3. Take Profit — triggers a market sell when price rises to TP
+            # Binance spot TAKE_PROFIT becomes a market order when stopPrice is hit
             await self.exchange.create_order(
                 symbol=market_symbol,
-                type='take_profit_market',
-                side=sl_side,
+                type='take_profit',
+                side='sell',
                 amount=amount,
                 params={
                     'stopPrice': tp,
-                    'reduceOnly': True,
-                    'workingType': 'MARK_PRICE',
                 },
             )
 
             logger.info(
-                f"Execution: {side} {market_symbol} entry=${price:.2f} "
+                f"Execution: LONG {market_symbol} entry=${price:.2f} "
                 f"SL=${sl:.2f} TP=${tp:.2f} qty={amount}"
             )
             return entry
