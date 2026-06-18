@@ -315,6 +315,8 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
     _health["total_signals_generated"] = _health.get("total_signals_generated", 0) + _generated_count
     _health["total_signals_kept"] = _health.get("total_signals_kept", 0) + len(all_signals)
 
+
+
     if not all_signals:
         return
 

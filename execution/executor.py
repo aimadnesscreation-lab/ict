@@ -1,9 +1,9 @@
 """
-Live Execution Engine — Binance Demo Trading (USDT-M Futures).
+Live Execution Engine — Binance Spot Demo Trading.
 
-Supports Binance Demo Trading Portal and Binance Testnet with fallback.
-Handles symbol conversion (BTCUSDT → BTC/USDT:USDT), amount precision,
-and exchange position tracking to prevent duplicate trades.
+Supports Binance Demo Trading Portal with fallback to Testnet.
+Handles symbol conversion (BTCUSDT → BTC/USDT), amount precision,
+and balance-based position tracking.
 
 Usage:
     executor = LiveExecutor(mode="demo")
@@ -235,12 +235,18 @@ class LiveExecutor:
     async def has_position(self, symbol: str) -> bool:
         """Check if the exchange has an open position for a given symbol.
 
-        SPOT: Checks if the free balance of the base asset is > 0.
+        SPOT: Checks if the free balance of the base asset exceeds a
+        minimum threshold (to ignore dust from testing or fees).
+
+        Minimum thresholds:
+          - BTC: ≥ 0.001 (≈ $65 at $65k BTC)
+          - ETH: ≥ 0.01  (≈ $18 at $1.8k ETH)
+          - Others: ≥ 1 unit
 
         Args:
             symbol: Raw symbol like 'BTCUSDT'
         Returns:
-            True if we hold a non-zero balance of the base asset
+            True if we hold a meaningful balance of the base asset
         """
         if not self.exchange:
             return False
@@ -248,7 +254,10 @@ class LiveExecutor:
             balance = await self.exchange.fetch_balance()
             base = symbol.replace('USDT', '')
             free = float(balance.get(base, {}).get('free', 0))
-            return free > 0
+            # Minimum thresholds to ignore dust
+            thresholds = {"BTC": 0.001, "ETH": 0.01}
+            min_balance = thresholds.get(base, 1.0)
+            return free >= min_balance
         except Exception as e:
             logger.error(f"Execution: has_position failed for {symbol}: {e}")
             return False
@@ -274,20 +283,22 @@ class LiveExecutor:
         tp: float,
     ) -> Optional[Dict]:
         """
-        Place Spot Market order with attached Stop Loss and Take Profit.
+        Place Spot Market order with OCO Stop Loss + Take Profit.
 
-        SPOT LIMITATION: Only LONG positions are supported on spot markets.
-        SHORT signals are skipped with a warning.
+        SPOT LIMITATION: Only LONG positions are supported. SHORT signals
+        are skipped with a warning (would require margin).
 
-        For LONG positions, we:
+        On Binance spot, SL and TP cannot be placed as separate sell orders
+        because each one locks the base asset. Instead we use an OCO
+        (One-Cancels-Other) order which combines both into a single order
+        sharing the same quantity lock:
           1. Market buy the base asset
-          2. Place a STOP_LOSS sell order (triggers market sell when stop price hit)
-          3. Place a TAKE_PROFIT sell order (triggers market sell when TP price hit)
+          2. Place an OCO sell: LIMIT at TP level + STOP_LOSS_LIMIT at SL level
 
         Args:
             symbol: Raw symbol like 'BTCUSDT'
             side: 'LONG' or 'SHORT' (SHORT is skipped on spot)
-            qty: Quantity in base currency (e.g. BTC for BTC/USDT)
+            qty: Desired quantity in base currency (actual fill may differ due to fees)
             price: Current market price (for reference/logging)
             sl: Stop-loss price
             tp: Take-profit price
@@ -309,10 +320,25 @@ class LiveExecutor:
         # Convert to CCXT unified spot symbol
         market_symbol = normalize_symbol(symbol)
 
+        # ═══ SPOT SIZING: Cap quantity to available USDT balance ═══
+        # DemoAccount calculates qty using futures-style risk sizing:
+        #   qty = risk_amount / sl_distance
+        # This gives a qty with full notional = qty × price, which can exceed
+        # the USDT balance. On spot (1:1, no leverage), we must cap to what
+        # the balance can actually afford.
+        usdt_balance = await self.get_balance()
+        max_qty_by_balance = usdt_balance / price if price > 0 else qty
+        capped_qty = min(qty, max_qty_by_balance)
+        if capped_qty < qty:
+            logger.info(
+                f"Execution: Spot sizing cap — qty {qty} exceeds USDT balance "
+                f"(${usdt_balance:.2f} ÷ ${price:.2f} = {max_qty_by_balance:.6f}), "
+                f"using {capped_qty:.6f}"
+            )
         # Validate and round quantity
-        amount = self._round_amount(symbol, qty)
+        amount = self._round_amount(symbol, capped_qty)
         if amount is None or amount <= 0:
-            logger.warning(f"Execution: Invalid quantity {qty} for {symbol} after rounding")
+            logger.warning(f"Execution: Invalid quantity {capped_qty} for {symbol} after rounding")
             return None
 
         try:
@@ -321,7 +347,7 @@ class LiveExecutor:
                 f"SL={sl} TP={tp}"
             )
 
-            # 1. Entry Market Order (buy base asset with USDT)
+            # 1. Market Entry — buy the base asset
             entry = await self.exchange.create_order(
                 symbol=market_symbol,
                 type='market',
@@ -329,33 +355,66 @@ class LiveExecutor:
                 amount=amount,
             )
 
-            # 2. Stop Loss — triggers a market sell when price drops to SL
-            # Binance spot STOP_LOSS becomes a market order when stopPrice is hit
-            await self.exchange.create_order(
-                symbol=market_symbol,
-                type='stop_loss',
-                side='sell',
-                amount=amount,
-                params={
-                    'stopPrice': sl,
-                },
-            )
+            # Determine the actual filled quantity.
+            # On Binance spot, the entry order's 'filled' is the gross filled
+            # amount. After the taker fee (~0.1%) is deducted, the actual
+            # receivable balance is slightly less. We fetch the post-fill
+            # balance to get the exact amount available for the OCO sell.
+            filled = float(entry.get('filled', 0))
+            if filled <= 0:
+                filled = amount
 
-            # 3. Take Profit — triggers a market sell when price rises to TP
-            # Binance spot TAKE_PROFIT becomes a market order when stopPrice is hit
-            await self.exchange.create_order(
-                symbol=market_symbol,
-                type='take_profit',
-                side='sell',
-                amount=amount,
-                params={
-                    'stopPrice': tp,
-                },
-            )
+            # Fetch actual balance after the market buy to account for fees
+            try:
+                post_balance = await self.exchange.fetch_balance()
+                base_cur = symbol.replace('USDT', '')
+                actual_free = float(post_balance.get(base_cur, {}).get('free', 0))
+                if actual_free > 0:
+                    actual_qty_raw = actual_free
+                else:
+                    # Fallback: estimate net after 0.1% taker fee
+                    actual_qty_raw = filled * 0.999
+            except Exception:
+                actual_qty_raw = filled * 0.999  # Fallback: estimate after fee
+
+            actual_qty = self._round_amount(symbol, actual_qty_raw)
+            if actual_qty is None or actual_qty <= 0:
+                logger.warning(f"Execution: Post-fill balance {actual_qty_raw} too small for {symbol} OCO")
+                return entry
+
+            logger.info(f"  Filled {filled} {market_symbol}, post-fee balance={actual_qty:.6f} (requested {amount})")
+
+            # 2. OCO — combines Stop Loss + Take Profit in one order
+            # On Binance spot, CCXT's type='oco' is rejected by market validation.
+            # Instead we call privatePostOrderOco directly — POST /api/v3/order/oco
+            # This places:
+            #   - LIMIT sell at TP (fills when price rises to take-profit level)
+            #   - STOP_LOSS_LIMIT sell triggered when price drops to SL
+            # Both legs share the same quantity lock (no double-lock issue).
+            oco_params = {
+                'symbol': symbol.upper(),          # ETHUSDT (Binance raw format)
+                'side': 'SELL',
+                'quantity': actual_qty,
+                'price': tp,                       # LIMIT price = take profit
+                'stopPrice': sl,                   # Stop trigger = stop loss
+                'stopLimitPrice': sl,              # Stop limit price = same as trigger
+                'stopLimitTimeInForce': 'GTC',
+            }
+
+            # Format numbers to exchange precision
+            try:
+                oco_params['quantity'] = self.exchange.amount_to_precision(market_symbol, actual_qty)
+                oco_params['price'] = self.exchange.price_to_precision(market_symbol, tp)
+                oco_params['stopPrice'] = self.exchange.price_to_precision(market_symbol, sl)
+                oco_params['stopLimitPrice'] = self.exchange.price_to_precision(market_symbol, sl)
+            except Exception:
+                pass  # Use raw floats if precision formatting fails
+
+            oco_result = await self.exchange.privatePostOrderOco(oco_params)
 
             logger.info(
                 f"Execution: LONG {market_symbol} entry=${price:.2f} "
-                f"SL=${sl:.2f} TP=${tp:.2f} qty={amount}"
+                f"SL=${sl:.2f} TP=${tp:.2f} qty={actual_qty} (OCO placed, orderListId={oco_result.get('orderListId', '?')})"
             )
             return entry
 
