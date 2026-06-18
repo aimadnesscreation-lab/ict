@@ -110,7 +110,9 @@ fi
 
 # ── Step 5: Quick connection test ────────────────────────────
 info "Running connection test..."
-if python test_live_connection.py 2>&1 | grep -q "✅ ALL"; then
+TEST_OUTPUT=$(python test_live_connection.py 2>&1)
+echo "$TEST_OUTPUT"
+if echo "$TEST_OUTPUT" | grep -q "✅ ALL"; then
     ok "Binance demo connection verified"
 else
     warn "Connection test did not pass all checks — check your .env credentials."
