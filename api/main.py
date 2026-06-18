@@ -45,7 +45,7 @@ _health: Dict = {
     "total_signals_kept": 0,
     "total_trades_executed": 0,
     "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    "data_sources": ["Binance (REST, 15s poll)"],
+    "data_sources": ["Binance (WebSockets, Real-time)"],
     "sync_stats": {
         "total_cycles": 0, "total_closed_from_sl": 0, "total_closed_from_tp": 0,
         "total_closed_from_manual": 0, "total_errors": 0,
@@ -225,10 +225,10 @@ async def _broadcast_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background workers on startup, cancel on shutdown."""
-    # Crypto data worker (Binance REST 15s poll)
+    # Crypto data worker (Binance WebSockets, Real-time)
     crypto_task = asyncio.create_task(_crypto_data_worker())
     _background_tasks.append(crypto_task)
-    logger.info("Crypto data worker started (Binance REST, 15s poll).")
+    logger.info("Crypto data worker started (Binance WebSockets, Real-time).")
 
     # HTF bias worker (Binance 1h data, every 15 min)
     bias_task = asyncio.create_task(_htf_bias_worker())
@@ -389,115 +389,135 @@ def _append_to_buffer(symbol: str, tf: str, candle: Dict):
 
 async def _crypto_data_worker():
     """
-    Polls Binance REST every 15s for ticker + candles.
+    Uses Binance WebSockets (via CCXT Pro) for real-time ticker + candles.
     On new candle close: runs orchestrator.process_candle_close().
     """
     global _latest_prices, _latest_ticks, _recent_signals, _recent_trades, _performance_cache
 
     await _backfill_buffers()
-    _last_ts: Dict[str, datetime] = {}
+    
+    import ccxt.pro as ccxtpro
+    # Initialize CCXT Pro exchange for real-time data
+    exchange = ccxtpro.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"}
+    })
+    
+    # Track the last processed candle timestamp per symbol
+    last_processed_ts: Dict[str, int] = {}
+    for symbol in SYMBOLS:
+        buf = _candle_buffers.get(symbol, {}).get("5m", [])
+        if buf:
+            # Convert to ms timestamp for comparison
+            last_processed_ts[symbol] = int(buf[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
 
-    while True:
-        try:
-            await asyncio.sleep(15)
+    async def handle_tickers():
+        """Watch real-time price ticks for all symbols."""
+        while True:
+            try:
+                tickers = await exchange.watch_tickers(SYMBOLS)
+                for symbol in SYMBOLS:
+                    if symbol in tickers:
+                        t = tickers[symbol]
+                        price = float(t["last"])
+                        _latest_prices[symbol] = price
+                        _latest_ticks[symbol] = {
+                            "symbol": symbol,
+                            "price": price,
+                            "change_24h": round(float(t.get("percentage", 0) or 0), 2),
+                            "high_24h": float(t.get("high", price) or price),
+                            "low_24h": float(t.get("low", price) or price),
+                            "volume": round(float(t.get("baseVolume", 0) or 0), 2),
+                            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                        }
+            except Exception as e:
+                logger.debug(f"[WS] Ticker error: {e}")
+                await asyncio.sleep(2)
 
-            for symbol in SYMBOLS:
-                # ── Step 1: Live ticker ──────────────────────────────
-                ticker = await _binance_fetch_ticker(symbol)
-                if ticker and ticker["price"] > 0:
-                    _latest_prices[symbol] = ticker["price"]
-                    _latest_ticks[symbol] = {
-                        "symbol": symbol,
-                        "price": ticker["price"],
-                        "change_24h": ticker["change_24h"],
-                        "high_24h": ticker["high_24h"],
-                        "low_24h": ticker["low_24h"],
-                        "volume": ticker["volume"],
-                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    }
-
-                # ── Step 2: Fetch 5m candles ──────────────────────
-                candles = await _binance_fetch_candles(symbol, "5m", 288)
-                if not candles:
-                    logger.warning(f"[Crypto] Candle fetch failed for {symbol}, skipping...")
+    async def handle_ohlcv(symbol: str):
+        """Watch real-time OHLCV candles and detect closes."""
+        while True:
+            try:
+                # watchOHLCV returns a list of [timestamp, open, high, low, close, volume]
+                ohlcvs = await exchange.watch_ohlcv(symbol, "5m")
+                if not ohlcvs:
                     continue
-
-                candles_sorted = sorted(candles, key=lambda c: c["timestamp"])
-                last = candles_sorted[-1]
-
-                # Fallback: use candle close if ticker fetch failed
-                if not ticker or ticker["price"] <= 0:
-                    _latest_prices[symbol] = last["close"]
-
-                # ── Step 3: Check for new candle close ───────────────
-                confirmed = [c for c in candles_sorted if c.get("confirmed", True)]
-                if not confirmed:
-                    continue
-                last_confirmed = confirmed[-1]["timestamp"]
-                if last_confirmed == _last_ts.get(symbol):
-                    continue  # Same candle as before — no new signal cycle
-
-                _last_ts[symbol] = last_confirmed
-
+                
                 # Update buffers
                 _candle_buffers.setdefault(symbol, {})["5m"] = [
-                    {"timestamp": c["timestamp"], "open": c["open"],
-                     "high": c["high"], "low": c["low"], "close": c["close"],
-                     "volume": c["volume"]} for c in candles_sorted
+                    {
+                        "timestamp": datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc).replace(tzinfo=None), 
+                        "open": c[1], "high": c[2], "low": c[3], "close": c[4], 
+                        "volume": c[5]
+                    } for c in ohlcvs
                 ]
+                
+                # Check for candle close
+                # A candle is considered closed when we receive an update for a NEWER timestamp
+                latest_ts = ohlcvs[-1][0]
+                
+                if symbol not in last_processed_ts:
+                    last_processed_ts[symbol] = latest_ts
+                    continue
+                
+                if latest_ts > last_processed_ts[symbol]:
+                    logger.info(f"[WS] {symbol} 5m: Candle closed @ {datetime.fromtimestamp(last_processed_ts[symbol]/1000, tz=timezone.utc)}")
+                    last_processed_ts[symbol] = latest_ts
+                    
+                    # Resample to 15m
+                    df_5m = pl.DataFrame(_candle_buffers[symbol]["5m"])
+                    df_15m = _resample_5m_to_15m(df_5m)
+                    _candle_buffers[symbol]["15m"] = [
+                        {"timestamp": r["timestamp"], "open": r["open"],
+                         "high": r["high"], "low": r["low"], "close": r["close"],
+                         "volume": r["volume"]} for r in df_15m.to_dicts()
+                    ]
+                    
+                    # Run orchestrator on the CLOSED candle 
+                    # (we slice to avoid the current incomplete candle at the end of the buffer)
+                    htf_bias = _health.get("htf_bias", "neutral")
+                    result = await _orchestrator.process_candle_close(
+                        symbol=symbol,
+                        df_5m=df_5m.slice(0, len(df_5m) - 1), 
+                        df_15m=df_15m,
+                        current_prices=dict(_latest_prices),
+                        htf_bias=htf_bias,
+                    )
+                    
+                    # Update global state
+                    _recent_signals = result.get("signals", []) + _recent_signals
+                    if len(_recent_signals) > 500:
+                        _recent_signals = _recent_signals[:500]
+                    _recent_trades = result.get("trades", [])
+                    _performance_cache = result.get("performance", {})
 
-                # Resample to 15m
-                df_5m = pl.DataFrame(_candle_buffers[symbol]["5m"])
-                df_15m = _resample_5m_to_15m(df_5m)
-                _candle_buffers[symbol]["15m"] = [
-                    {"timestamp": r["timestamp"], "open": r["open"],
-                     "high": r["high"], "low": r["low"], "close": r["close"],
-                     "volume": r["volume"]} for r in df_15m.to_dicts()
-                ]
+                    _health["total_signals_generated"] = _orchestrator.total_signals_generated
+                    _health["total_signals_kept"] = _orchestrator.total_signals_kept
+                    _health["total_trades_executed"] = _orchestrator.total_trades_executed
+                    _health["last_cycle_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                    _health["cycle_count"] = _orchestrator.cycle_count
 
-                # Fallback tick from candle close
-                if not ticker or ticker["price"] <= 0:
-                    _latest_ticks[symbol] = {
-                        "symbol": symbol, "price": last["close"],
-                        "change_24h": 0.0, "high_24h": last["high"],
-                        "low_24h": last["low"], "volume": round(last["volume"], 2),
-                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    }
+                    asyncio.ensure_future(_broadcast_data())
+                
+            except Exception as e:
+                logger.debug(f"[WS] OHLCV error for {symbol}: {e}")
+                await asyncio.sleep(2)
 
-                # ── Step 4: Run orchestrator ─────────────────────────
-                logger.info(f"[Crypto] {symbol} 5m: new candle @ {last['close']}")
-                htf_bias = _health.get("htf_bias", "neutral")
+    try:
+        # Run ticker watcher and OHLCV watchers in parallel
+        ticker_task = asyncio.create_task(handle_tickers())
+        ohlcv_tasks = [asyncio.create_task(handle_ohlcv(s)) for s in SYMBOLS]
+        
+        await asyncio.gather(ticker_task, *ohlcv_tasks)
+    except asyncio.CancelledError:
+        logger.info("[WS] Worker shutting down...")
+    except Exception as e:
+        logger.error(f"[WS] Critical worker error: {e}")
+        _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _health["last_error_message"] = f"WS: {e}"
+    finally:
+        await exchange.close()
 
-                result = await _orchestrator.process_candle_close(
-                    symbol=symbol,
-                    df_5m=df_5m,
-                    df_15m=df_15m,
-                    current_prices=dict(_latest_prices),
-                    htf_bias=htf_bias,
-                )
-
-                # Update global state from orchestrator result
-                _recent_signals = result.get("signals", []) + _recent_signals
-                if len(_recent_signals) > 500:
-                    _recent_signals = _recent_signals[:500]
-                _recent_trades = result.get("trades", [])
-                _performance_cache = result.get("performance", {})
-
-                _health["total_signals_generated"] = _orchestrator.total_signals_generated
-                _health["total_signals_kept"] = _orchestrator.total_signals_kept
-                _health["total_trades_executed"] = _orchestrator.total_trades_executed
-                _health["last_cycle_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                _health["cycle_count"] = _orchestrator.cycle_count
-
-                logger.info(f"[Crypto] {symbol}: {result['signals_generated']} signals")
-
-                # Broadcast updated state to all WebSocket data clients
-                asyncio.ensure_future(_broadcast_data())
-
-        except Exception as e:
-            logger.warning(f"[Crypto] Polling error: {e}")
-            _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            _health["last_error_message"] = f"Crypto: {e}"
 
 
 async def _htf_bias_worker():
