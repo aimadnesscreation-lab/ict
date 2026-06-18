@@ -55,6 +55,7 @@ export default function Layout({ children, activePage, onPageChange }: LayoutPro
             <button
               key={item.key}
               onClick={() => onPageChange(item.key)}
+              {...(activePage === item.key ? { 'aria-current': 'page' as const } : {})}
               className={cn(
                 'flex items-center space-x-3 w-full px-3 py-2.5 rounded-lg transition-colors text-left text-sm',
                 activePage === item.key

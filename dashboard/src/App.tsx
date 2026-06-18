@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useState, lazy, Suspense } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import Layout from './components/Layout';
-import Overview from './pages/Overview';
-import Signals from './pages/Signals';
-import Charts from './pages/Charts';
-import TradeLog from './pages/TradeLog';
-import RiskCenter from './pages/RiskCenter';
-import SettingsPage from './pages/Settings';
+
+const Overview = lazy(() => import('./pages/Overview'));
+const Signals = lazy(() => import('./pages/Signals'));
+const Charts = lazy(() => import('./pages/Charts'));
+const TradeLog = lazy(() => import('./pages/TradeLog'));
+const RiskCenter = lazy(() => import('./pages/RiskCenter'));
+const SettingsPage = lazy(() => import('./pages/Settings'));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -17,6 +18,14 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center h-64">
+      <div className="animate-pulse text-slate-500 text-sm">Loading...</div>
+    </div>
+  );
+}
 
 function App() {
   const [activePage, setActivePage] = useState('Overview');
@@ -36,7 +45,9 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <Layout activePage={activePage} onPageChange={setActivePage}>
-        {renderPage()}
+        <Suspense fallback={<PageFallback />}>
+          {renderPage()}
+        </Suspense>
       </Layout>
     </QueryClientProvider>
   );

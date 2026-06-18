@@ -18,7 +18,6 @@ interface DataStreamState {
   risk: RiskStatus | null;
   performance: PerformanceMetrics | null;
   connected: boolean;
-  lastUpdate: number;
 }
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? (() => {
@@ -83,7 +82,7 @@ async function pollREST(): Promise<Partial<DataSnapshot>> {
 export function useDataStream() {
   const [state, setState] = useState<DataStreamState>({
     signals: [], trades: [], demo: null, health: null,
-    risk: null, performance: null, connected: false, lastUpdate: 0,
+    risk: null, performance: null, connected: false,
   });
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -111,7 +110,6 @@ export function useDataStream() {
           risk: data.risk_status ?? EMPTY_RISK,
           performance: data.performance ?? EMPTY_PERF,
           connected: false,
-          lastUpdate: Date.now(),
         });
       }
     });
@@ -128,7 +126,6 @@ export function useDataStream() {
           health: data.health ?? prev.health,
           risk: data.risk_status ?? prev.risk,
           performance: data.performance ?? prev.performance,
-          lastUpdate: Date.now(),
         }));
       }
 
@@ -191,7 +188,6 @@ export function useDataStream() {
               risk: snap.risk_status ?? EMPTY_RISK,
               performance: snap.performance ?? EMPTY_PERF,
               connected: true,
-              lastUpdate: Date.now(),
             });
           }
         } catch {
