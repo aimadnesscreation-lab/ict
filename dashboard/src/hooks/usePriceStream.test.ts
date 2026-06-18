@@ -5,6 +5,7 @@ import type { PriceTick } from './usePriceStream';
 
 // ── Mock WebSocket ──────────────────────────────────────────────────────
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type WsListener = ((event: any) => void) | null;
 
 interface MockWebSocketInstance {
@@ -94,6 +95,7 @@ class FakeWebSocket {
     currentMock = instance;
 
     // Return a proxy that delegates to the instance
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const proxy: any = {};
     Object.defineProperties(proxy, {
       url: { get: () => instance.url },
@@ -113,8 +115,9 @@ beforeEach(() => {
   currentMock = null;
   vi.useFakeTimers();
   // Set up the mock global WebSocket
-  (globalThis as any).WebSocket = FakeWebSocket;
+  (globalThis as unknown as { WebSocket: typeof FakeWebSocket }).WebSocket = FakeWebSocket;
 });
+
 
 afterEach(() => {
   vi.useRealTimers();
@@ -286,7 +289,7 @@ describe('usePriceStream', () => {
 
   it('should fall back to mock data immediately if WebSocket constructor throws', () => {
     // Make WebSocket throw
-    (globalThis as any).WebSocket = class ThrowsOnCreate {
+    (globalThis as unknown as { WebSocket: new () => void }).WebSocket = class ThrowsOnCreate {
       constructor() { throw new Error('Connection refused'); }
     };
 

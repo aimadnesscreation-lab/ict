@@ -5,7 +5,7 @@ import { usePriceStream } from '../hooks/usePriceStream';
 import { cn, formatPrice, shortenSymbol } from '../utils/format';
 import ICTChart from '../components/ICTChart';
 import EMABiasChart from '../components/EMABiasChart';
-import type { CandlestickData } from 'lightweight-charts';
+import type { CandlestickData, Time } from 'lightweight-charts';
 
 const SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 const TIMEFRAMES = ['1h', '5m', '15m'];
@@ -23,10 +23,12 @@ export default function Charts() {
     refetchInterval: 15_000,
   });
 
+  const [initialTime] = useState(() => Math.floor(Date.now() / 1000));
+
   const chartData = useMemo((): CandlestickData[] => {
     if (candles.length > 0) {
       return candles.map(c => ({
-        time: Math.floor(new Date(c.timestamp).getTime() / 1000) as any,
+        time: Math.floor(new Date(c.timestamp).getTime() / 1000) as Time,
         open: c.open,
         high: c.high,
         low: c.low,
@@ -34,18 +36,18 @@ export default function Charts() {
       }));
     }
     // Fallback mock
-    const now = Math.floor(Date.now() / 1000);
+    const now = initialTime;
     const base = symbol.startsWith('BTC') ? 68000 : 3500;
     const range = symbol.startsWith('BTC') ? 500 : 50;
     const step = timeframe === '5m' ? 300 : timeframe === '15m' ? 900 : 3600;
     return Array.from({ length: 100 }, (_, i) => ({
-      time: (now - (100 - i) * step) as any,
+      time: (now - (100 - i) * step) as Time,
       open: base + Math.sin(i * 0.3) * range * 0.5,
       high: base + Math.sin(i * 0.3) * range * 0.5 + range * 0.3,
       low: base + Math.sin(i * 0.3) * range * 0.5 - range * 0.3,
       close: base + Math.sin(i * 0.3 + 0.2) * range * 0.5,
     }));
-  }, [candles, symbol, timeframe]);
+  }, [candles, symbol, timeframe, initialTime]);
 
   const tick = prices[symbol];
   const currentPrice = tick?.price ?? (chartData.length > 0 ? chartData[chartData.length - 1].close : 0);
@@ -104,7 +106,7 @@ export default function Charts() {
 
       {/* EMA Bias (1h only) */}
       {timeframe === '1h' && chartData.length >= 26 && (
-        <EMABiasChart data={chartData} />
+        <EMABiasChart data={chartData as { time: number; close: number }[]} />
       )}
     </div>
   );

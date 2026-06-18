@@ -1,9 +1,9 @@
 import { useEffect, useRef, useMemo } from 'react';
-import { createChart, ColorType, LineSeries } from 'lightweight-charts';
+import { createChart, ColorType, LineSeries, type Time } from 'lightweight-charts';
 import { cn } from '../utils/format';
 
 interface EMABiasChartProps {
-  data: { time: any; close: number }[];
+  data: { time: number; close: number }[];
 }
 
 function computeEMA(prices: number[], period: number): (number | null)[] {
@@ -41,17 +41,17 @@ export default function EMABiasChart({ data }: EMABiasChartProps) {
   }, [data]);
 
   const ema12Data = useMemo(() => {
-    const result: { time: any; value: number }[] = [];
+    const result: { time: Time; value: number }[] = [];
     for (let i = 0; i < data.length; i++) {
-      if (ema12Values[i] !== null) result.push({ time: data[i].time, value: ema12Values[i]! });
+      if (ema12Values[i] !== null) result.push({ time: data[i].time as Time, value: ema12Values[i]! });
     }
     return result;
   }, [data, ema12Values]);
 
   const ema26Data = useMemo(() => {
-    const result: { time: any; value: number }[] = [];
+    const result: { time: Time; value: number }[] = [];
     for (let i = 0; i < data.length; i++) {
-      if (ema26Values[i] !== null) result.push({ time: data[i].time, value: ema26Values[i]! });
+      if (ema26Values[i] !== null) result.push({ time: data[i].time as Time, value: ema26Values[i]! });
     }
     return result;
   }, [data, ema26Values]);
