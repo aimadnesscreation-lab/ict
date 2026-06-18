@@ -15,7 +15,7 @@ Kill Zones:
 """
 
 import polars as pl
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, Optional, Tuple
 
 
@@ -37,7 +37,7 @@ KILL_ZONE_WINDOWS = {
 
 def _utc_now() -> datetime:
     """Return current UTC datetime."""
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def is_in_window(candle_time: datetime, window_start: time, window_end: time) -> bool:

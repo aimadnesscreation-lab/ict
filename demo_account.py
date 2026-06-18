@@ -15,7 +15,7 @@ Rules:
 """
 
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from loguru import logger
 
@@ -76,7 +76,7 @@ class DemoAccount:
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
         self._daily_pnl = 0.0
-        self._last_trade_date = datetime.utcnow().date()
+        self._last_trade_date = datetime.now(timezone.utc).date()
         # Track last stop-loss for each symbol to prevent rapid re-entry
         self._last_sl: Dict[str, Dict] = {}  # {symbol: {"time": datetime, "side": str}}
 
@@ -93,11 +93,11 @@ class DemoAccount:
         Args:
             signals: List of signal dicts
             current_prices: Dict of {symbol: current_price}
-            current_time: Timestamp override for backtesting (uses datetime.utcnow() in live mode)
+            current_time: Timestamp override for backtesting (uses datetime.now(timezone.utc) in live mode)
 
         Returns the list of trades that were closed this cycle (for logging).
         """
-        now = current_time if current_time is not None else datetime.utcnow()
+        now = current_time if current_time is not None else datetime.now(timezone.utc)
 
         # Reset daily P&L on UTC day change — prevents permanent lockout
         today = now.date()
@@ -346,7 +346,7 @@ class DemoAccount:
             symbol=symbol,
             signal_type=signal_type,
             side=side,
-            entry_time=timestamp if isinstance(timestamp, datetime) else datetime.utcnow(),
+            entry_time=timestamp if isinstance(timestamp, datetime) else datetime.now(timezone.utc),
             entry_price=price,
             stop_loss=stop_loss,
             take_profit=take_profit,
@@ -405,9 +405,9 @@ class DemoAccount:
 
         # Record stop-loss for cooldown tracking (prevents immediate same-side re-entry)
         if exit_reason == "STOP_LOSS":
-            self._last_sl[pos.symbol] = {"time": current_time or datetime.utcnow(), "side": pos.side}
+            self._last_sl[pos.symbol] = {"time": current_time or datetime.now(timezone.utc), "side": pos.side}
 
-        now = current_time if current_time is not None else datetime.utcnow()
+        now = current_time if current_time is not None else datetime.now(timezone.utc)
 
         trade = ClosedTrade(
             symbol=pos.symbol,

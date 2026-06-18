@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import random
 import os
 import time
@@ -49,7 +49,7 @@ _health: Dict = {
     "total_signals_generated": 0,
     "total_signals_kept": 0,
     "total_trades_executed": 0,
-    "started_at": datetime.utcnow().isoformat() + "Z",
+    "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     "data_sources": [],
     "sync_stats": {
         "total_cycles": 0,
@@ -410,7 +410,7 @@ async def _run_crypto_analysis(symbol: str, tf_closed: str):
                 except Exception as e:
                     logger.warning(f"[Crypto] Discord send failed: {e}")
 
-    _health["last_cycle_time"] = datetime.utcnow().isoformat() + "Z"
+    _health["last_cycle_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     logger.info(f"[Crypto] {symbol} {tf_closed}: {len(all_signals)} signals")
 
 
@@ -667,7 +667,7 @@ async def _crypto_data_worker():
                                     "high_24h": float(data.get("h", p)),
                                     "low_24h": float(data.get("l", p)),
                                     "volume": round(float(data.get("v", 0)), 2),
-                                    "timestamp": datetime.utcnow().isoformat() + "Z"}
+                                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
             except Exception:
                 pass  # WS unavailable (e.g. HTTP 451), keep retrying
             await asyncio.sleep(retry)
@@ -692,7 +692,7 @@ async def _crypto_data_worker():
                         "high_24h": ticker["high_24h"],
                         "low_24h": ticker["low_24h"],
                         "volume": ticker["volume"],
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                     }
 
                 # ── Step 2: Fetch OHLCV candles for ICT analysis ──
@@ -735,14 +735,14 @@ async def _crypto_data_worker():
                         _latest_ticks[symbol] = {"symbol": symbol, "price": last["close"],
                             "change_24h": 0.0, "high_24h": last["high"],
                             "low_24h": last["low"], "volume": round(last["volume"], 2),
-                            "timestamp": datetime.utcnow().isoformat() + "Z"}
+                            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
                     # Run analysis
                     logger.info(f"[Crypto] {symbol} 5m: new candle @ {last['close']}")
                     await _run_crypto_analysis(symbol, "5m")
 
         except Exception as e:
             logger.warning(f"[Crypto] Polling error: {e}")
-            _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
+            _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             _health["last_error_message"] = f"Crypto: {e}"
 
 
@@ -776,7 +776,7 @@ async def _htf_bias_worker():
                 logger.warning(f"[Bias] Not enough data ({len(candles) if candles else 0} candles), keeping current")
         except Exception as e:
             logger.warning(f"[Bias] Update failed: {e}")
-            _health["last_error_time"] = datetime.utcnow().isoformat() + "Z"
+            _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             _health["last_error_message"] = f"Bias: {e}"
 
         _health["status"] = "running"
@@ -952,7 +952,7 @@ async def _okx_fetch_history(symbol: str, bar: str, limit: int = 100, after: Opt
 async def get_backtest_data(
     symbol: str,
     days: int = Query(30, ge=1, le=90),
-    bar: str = Query("5m", regex="^(1m|5m|15m|1H|4H|1D)$"),
+    bar: str = Query("5m", pattern="^(1m|5m|15m|1H|4H|1D)$"),
     before: Optional[str] = Query(None, description="ISO timestamp to end the window (default: now)"),
 ):
     """
@@ -1148,11 +1148,11 @@ async def get_health():
     Return system health status for debugging.
     Exposes HTF bias, last cycle time, error counts, and worker status.
     """
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     uptime = now
     if _health.get("started_at"):
         started = datetime.fromisoformat(_health["started_at"].replace("Z", ""))
-        uptime_secs = (datetime.utcnow() - started).total_seconds()
+        uptime_secs = (datetime.now(timezone.utc) - started).total_seconds()
         uptime = f"{uptime_secs / 60:.0f}m {uptime_secs % 60:.0f}s"
 
     return {
@@ -1194,7 +1194,7 @@ async def reset_all():
     _demo_account._peak_balance = DEMO_INITIAL_BALANCE
     _demo_account._daily_pnl = 0.0
     _demo_account._last_sl.clear()
-    _demo_account._last_trade_date = datetime.utcnow().date()
+    _demo_account._last_trade_date = datetime.now(timezone.utc).date()
 
     # Reset all caches
     _signal_id_counter = 0
@@ -1301,7 +1301,7 @@ def _price_precision(symbol: str) -> int:
 
 # Shared in-memory state: latest price for each symbol
 _latest_prices: Dict[str, float] = {
-    "BTCUSDT": 68420.0, "ETHUSDT": 3520.0,
+    "BTCUSDT": 67000.0, "ETHUSDT": 1800.0,
 }
 _latest_ticks: Dict[str, Dict] = {}
 

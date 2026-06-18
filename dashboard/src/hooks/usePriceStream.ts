@@ -33,7 +33,7 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 
 const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
 const FALLBACK_BASE: Record<string, number> = {
-  BTCUSDT: 68420, ETHUSDT: 3520,
+  BTCUSDT: 67000, ETHUSDT: 1800,
 };
 
 function generateMockTick(prices: Record<string, number>): PriceTick {

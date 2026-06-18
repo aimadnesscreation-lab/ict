@@ -16,7 +16,7 @@ Usage:
 import asyncio
 import httpx
 import polars as pl
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from loguru import logger
 import sys
@@ -33,6 +33,7 @@ from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.breaker_block import BreakerBlockDetector
 from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
 from demo_account import DemoAccount, ClosedTrade
+import json
 
 # ── Data source mapping ────────────────────────────────────────────
 OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
@@ -335,18 +336,20 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts):
 
 
 async def backtest_symbol(symbol: str, chunk_size: int = 500,
-                          before: Optional[str] = None) -> Dict:
+                          before: Optional[str] = None,
+                          debug: bool = False) -> Dict:
     """Run 30-day backtest using DemoAccount.
 
     Args:
         symbol: BTCUSDT or ETHUSDT
         chunk_size: Candles per processing chunk
         before: ISO date to end the 30-day window (default: now)
+        debug: Enable per-trade debug logging and analysis
     """
     days = 30  # fixed 30-day window per month
 
     # 1. Fetch 5m data for this window
-    t0 = datetime.utcnow()
+    t0 = datetime.now(timezone.utc)
     df_5m_full = await fetch_historical_data(symbol, "5m", days, before=before)
     if df_5m_full.is_empty() or len(df_5m_full) < 100:
         return {"symbol": symbol, "month": str(before or "latest"),
@@ -356,7 +359,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     data_range = f"{df_5m_full['timestamp'].min().strftime('%b %d')} → " \
                  f"{df_5m_full['timestamp'].max().strftime('%b %d')}"
     logger.info(f"  Range: {data_range}, {len(df_5m_full)} candles "
-                f"[fetch: {(datetime.utcnow()-t0).total_seconds():.0f}s]")
+                f"[fetch: {(datetime.now(timezone.utc)-t0).total_seconds():.0f}s]")
 
     # 2. Fetch 1h data for HTF bias
     df_1h = await fetch_historical_data(symbol, "1H", days, before=before)
@@ -387,12 +390,16 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     signals_kept = 0
     bias_changes = 0
 
+    # Debug tracking
+    trade_log: List[Dict] = []
+    current_trade_start: Dict[str, Dict] = {}
+
     # Pre-compute all ICT columns once on the full 5m dataset
     # This replaces the per-candle run_ict_on_buffer calls (~8,640 calls → 1 call)
     logger.info(f"    Pre-computing ICT columns...")
-    t_ict = datetime.utcnow()
+    t_ict = datetime.now(timezone.utc)
     df_ict = precompute_ict(df_5m_full)
-    ict_elapsed = (datetime.utcnow() - t_ict).total_seconds()
+    ict_elapsed = (datetime.now(timezone.utc) - t_ict).total_seconds()
     logger.info(f"    ICT pre-compute: {ict_elapsed:.1f}s for {len(df_ict)} rows")
 
     # 5. Process in chunks with periodic HTF bias recomputation
@@ -430,7 +437,33 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 pos = demo.open_positions[sym]
                 reason, price = check_position_vs_candle(pos, current["high"], current["low"], current_ts)
                 if reason is not None:
+                    # Debug: log trade before closing
+                    if debug and sym in current_trade_start:
+                        held = candle_idx - current_trade_start[sym].get("candle_idx", candle_idx)
+                        trade_log.append({
+                            "symbol": pos.symbol, "side": pos.side,
+                            "signal_type": pos.signal_type,
+                            "atr": round(pos.atr, 4),
+                            "entry_price": round(pos.entry_price, 2),
+                            "exit_price": round(price, 2),
+                            "stop_loss": round(pos.stop_loss, 2),
+                            "take_profit": round(pos.take_profit, 2),
+                            "sl_distance": round(abs(pos.entry_price - pos.stop_loss), 2),
+                            "tp_distance": round(abs(pos.take_profit - pos.entry_price), 2),
+                            "profit": round(((price - pos.entry_price) * pos.quantity
+                                              if pos.side == "LONG"
+                                              else (pos.entry_price - price) * pos.quantity), 2),
+                            "result": "WIN" if ((price - pos.entry_price) * pos.quantity
+                                                  if pos.side == "LONG"
+                                                  else (pos.entry_price - price) * pos.quantity) > 0 else "LOSS",
+                            "exit_reason": reason,
+                            "held_candles": held,
+                            "entry_ts": pos.entry_time.isoformat(),
+                            "exit_ts": current_ts.isoformat(),
+                        })
                     close_position(demo, pos, price, reason, current_ts)
+                    if debug and sym in current_trade_start:
+                        del current_trade_start[sym]
 
             # Step 2: Extract signal from pre-computed ICT columns (fast: no pipeline re-run)
             aligned = []
@@ -450,13 +483,19 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                     aligned = []
 
             # Step 3: Feed signals to DemoAccount
+            prev_positions = set(demo.open_positions.keys())
             demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
+            # Debug: track when new positions open
+            if debug:
+                for sym in demo.open_positions.keys():
+                    if sym not in prev_positions:
+                        current_trade_start[sym] = {"candle_idx": candle_idx, "entry_ts": current_ts}
 
         i = chunk_end
 
         # Progress report
         pct = (i / total_candles) * 100
-        elapsed = (datetime.utcnow() - t0).total_seconds()
+        elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
         cps = i / elapsed if elapsed > 0 else 0
         logger.info(f"    [{symbol}] {pct:.0f}% — {i}/{total_candles} "
                     f"({cps:.0f} c/s, {elapsed:.0f}s)")
@@ -470,7 +509,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     losses = sum(1 for t in trades if t["result"] == "LOSS")
     breakeven = sum(1 for t in trades if t["result"] == "BREAK_EVEN")
 
-    elapsed = (datetime.utcnow() - t0).total_seconds()
+    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
     logger.info(f"  ── {symbol} Results ──")
     logger.info(f"  Trades: {perf['total_trades']} (W:{wins} L:{losses} BE:{breakeven}) | "
                 f"WR: {perf['win_rate']*100:.1f}% | PF: {perf['profit_factor']:.2f}")
@@ -482,7 +521,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     ts_max = df_5m_full['timestamp'].max().strftime('%b %d')
     data_range_str = f"{ts_min} → {ts_max}"
 
-    return {
+    result = {
         "symbol": symbol, "month": str(before or "latest"),
         "data_range": data_range_str,
         "htf_bias": htf_bias, "total_trades": perf["total_trades"],
@@ -493,17 +532,21 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         "signals_gen": signals_gen, "signals_kept": signals_kept,
         "still_open": len(open_pos), "bias_changes": bias_changes,
     }
+    if debug:
+        result["trade_log"] = trade_log
+    return result
 
 
 def print_month_result(month_num: int, month_label: str, data_range: str,
-                       r1: Dict, r2: Dict):
+                       r1: Dict, r2: Optional[Dict] = None):
     """Print a formatted monthly result block."""
     print(f"\n  {'─'*60}")
     print(f"  Month {month_num}/12 — {month_label}")
     print(f"  {data_range}")
     print(f"  {'─'*60}")
 
-    for r in [r1, r2]:
+    results_to_print = [r for r in [r1, r2] if r is not None]
+    for r in results_to_print:
         if r.get("total_trades", 0) == 0:
             print(f"  {r['symbol']}: {r.get('result', 'No trades')} ({r.get('htf_bias', '?').upper()})")
             continue
@@ -584,6 +627,106 @@ def print_combined_summary(all_results: List[Dict], num_months: int):
     print(f"  Avg monthly:  ${combined_profit / num_months:.2f}")
 
 
+def analyze_trades(trades: List[Dict], symbol: str):
+    """Analyze trade log for patterns—held duration, SL/TP distances, consecutive losses."""
+    if not trades:
+        print(f"\n  {symbol}: No trades to analyze")
+        return
+
+    total = len(trades)
+    wins = [t for t in trades if t["result"] == "WIN"]
+    losses = [t for t in trades if t["result"] == "LOSS"]
+    tp = [t for t in trades if t["exit_reason"] == "TAKE_PROFIT"]
+    sl = [t for t in trades if t["exit_reason"] == "STOP_LOSS"]
+    long_trades = [t for t in trades if t["side"] == "LONG"]
+    short_trades = [t for t in trades if t["side"] == "SHORT"]
+
+    avg_held = sum(t["held_candles"] for t in trades) / total
+    avg_held_win = sum(t["held_candles"] for t in wins) / len(wins) if wins else 0
+    avg_held_loss = sum(t["held_candles"] for t in losses) / len(losses) if losses else 0
+    avg_sl_dist = sum(t["sl_distance"] for t in trades) / total
+    avg_tp_dist = sum(t["tp_distance"] for t in trades) / total
+    avg_atr = sum(t["atr"] for t in trades) / total
+
+    tp_candles = [t["held_candles"] for t in tp]
+    sl_candles = [t["held_candles"] for t in sl]
+
+    consec_losses = []
+    streak = 0
+    for t in trades:
+        if t["result"] == "LOSS":
+            streak += 1
+        else:
+            if streak > 0:
+                consec_losses.append(streak)
+            streak = 0
+    if streak > 0:
+        consec_losses.append(streak)
+    max_streak = max(consec_losses) if consec_losses else 0
+    avg_streak = sum(consec_losses) / len(consec_losses) if consec_losses else 0
+
+    print(f"\n  {'='*55}")
+    print(f"  📊 {symbol} — DEBUG ANALYSIS")
+    print(f"  {'='*55}")
+    print(f"  Total trades:  {total}")
+    print(f"  Wins:          {len(wins)} ({len(wins)/total*100:.1f}%)")
+    print(f"  Losses:        {len(losses)} ({len(losses)/total*100:.1f}%)")
+    print(f"  TP hits:       {len(tp)} ({len(tp)/total*100:.1f}%)")
+    print(f"  SL hits:       {len(sl)} ({len(sl)/total*100:.1f}%)")
+    print(f"  LONG trades:   {len(long_trades)} ({len(long_trades)/total*100:.1f}%)")
+    print(f"  SHORT trades:  {len(short_trades)} ({len(short_trades)/total*100:.1f}%)")
+    print()
+    print(f"  ⏱  CANDLE DURATION")
+    print(f"  Avg held:      {avg_held:.1f} candles ({avg_held*5:.0f} min)")
+    print(f"  Avg held (win): {avg_held_win:.1f} candles ({avg_held_win*5:.0f} min)")
+    print(f"  Avg held (loss): {avg_held_loss:.1f} candles ({avg_held_loss*5:.0f} min)")
+    if tp_candles:
+        print(f"  TP range:      {min(tp_candles)}–{max(tp_candles)} candles")
+    if sl_candles:
+        print(f"  SL range:      {min(sl_candles)}–{max(sl_candles)} candles")
+    print()
+    print(f"  📐  ATR & DISTANCES")
+    print(f"  Avg ATR:       ${avg_atr:.2f} ({avg_atr/avg_sl_dist*100:.1f}% of SL dist)")
+    print(f"  Avg SL dist:   ${avg_sl_dist:.2f}")
+    print(f"  Avg TP dist:   ${avg_tp_dist:.2f}")
+    print(f"  Ratio TP/SL:   {avg_tp_dist/avg_sl_dist:.1f}x")
+    print()
+    print(f"  🔄  CONSECUTIVE LOSSES")
+    print(f"  Max streak:    {max_streak} losses in a row")
+    print(f"  Avg streak:    {avg_streak:.1f} losses")
+    print(f"  Streaks:       {consec_losses}")
+    print()
+
+    sorted_losses = sorted(losses, key=lambda t: t["profit"])
+    print(f"  💥  TOP 10 LARGEST LOSSES")
+    for t in sorted_losses[:10]:
+        print(f"    {t['side']:5s} {t['entry_ts'][:16]:16s} → {t['exit_ts'][:16]:16s} "
+              f"atr=${t['atr']:.2f} sl=${t['sl_distance']:.2f} "
+              f"held={t['held_candles']}c loss=${t['profit']:.2f}")
+
+    if len(trades) >= 2:
+        first_ts = datetime.fromisoformat(trades[0]["entry_ts"])
+        last_ts = datetime.fromisoformat(trades[-1]["entry_ts"])
+        days = max((last_ts - first_ts).total_seconds() / 86400, 1)
+        print(f"\n  📅  TRADE DENSITY")
+        print(f"  Period:        {first_ts.strftime('%b %d')} → {last_ts.strftime('%b %d')} ({days:.0f} days)")
+        print(f"  Trades/day:    {total/days:.1f}")
+        print(f"  Avg hours between trades: {24*days/total:.1f}h")
+
+    sl_trades = [t for t in sl]
+    reentries = 0
+    reentries_same_side = 0
+    for i in range(1, len(trades)):
+        if trades[i-1]["exit_reason"] == "STOP_LOSS":
+            reentries += 1
+            if trades[i]["side"] == trades[i-1]["side"]:
+                reentries_same_side += 1
+
+    print(f"\n  🔁  RE-ENTRY ANALYSIS (SL → next trade)")
+    print(f"  Re-entries after SL: {reentries} ({reentries/max(len(sl),1)*100:.0f}% of SL hits)")
+    print(f"  Same-side re-entries: {reentries_same_side} ({reentries_same_side/max(reentries,1)*100:.0f}% of re-entries)")
+
+
 async def main():
     import argparse
 
@@ -597,13 +740,17 @@ async def main():
                         help="Run both symbols per month in parallel")
     parser.add_argument("--capital", type=float, default=None,
                         help="Starting capital (default: 5000)")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Run a single symbol only (BTCUSDT or ETHUSDT). Default: both.")
+    parser.add_argument("--debug", action="store_true",
+                        help="Enable detailed per-trade debug analysis")
     args = parser.parse_args()
 
     logger.remove()
     logger.add(sys.stderr, level="INFO",
                format="<level>{level: <8}</level> | {message}")
 
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     all_raw_results = []
 
     if args.offset is not None:
@@ -624,10 +771,15 @@ async def main():
     if args.capital is not None:
         BACKTEST_CAPITAL = args.capital
 
+    symbols = [args.symbol.upper()] if args.symbol else SYMBOLS
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
     print(f"  Both symbols: 0.5x SL, 0min cooldown, min_score=60")
-    print(f"  Symbols: {', '.join(SYMBOLS)}")
+    print(f"  Symbols: {', '.join(symbols)}")
+    if args.debug:
+        print(f"  DEBUG MODE: enabled (per-trade analysis)")
     print("=" * 70 + "\n")
+
+    all_trade_logs: List[Dict] = []
 
     for month_idx, month_offset in enumerate(offsets):
         end_date = today - timedelta(days=month_offset * 30)
@@ -641,27 +793,35 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str) for sym in SYMBOLS]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
-            for sym in SYMBOLS:
-                r = await backtest_symbol(sym, before=before_str)
+            for sym in symbols:
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug)
                 results.append(r)
                 print()
 
-        r1, r2 = results[0], results[1]
+        r1, r2 = results[0], results[1] if len(results) > 1 else None
 
-        dr1 = r1.get("data_range", "") if r1.get("total_trades", 0) > 0 else "(no data)"
-        dr2 = r2.get("data_range", "") if r2.get("total_trades", 0) > 0 else "(no data)"
-        data_range = f"BTC: {dr1} | ETH: {dr2}"
+        labels = {s.upper(): s.upper() for s in symbols}
+        dr_parts = {}
+        for r in results:
+            sym = r["symbol"]
+            dr_parts[sym] = r.get("data_range", "") if r.get("total_trades", 0) > 0 else "(no data)"
+        data_range = " | ".join(f"{k}: {v}" for k, v in dr_parts.items())
 
         print_month_result(month_idx + 1, month_label, data_range, r1, r2)
         all_raw_results.extend(results)
 
+        # Collect debug trade logs
+        if args.debug:
+            for r in results:
+                if r.get("trade_log"):
+                    all_trade_logs.extend(r["trade_log"])
+
         if args.offset is not None:
             # Print single result as JSON for easy parsing
-            import json
             summary = {
                 "month_offset": args.offset,
                 "month": month_label,
@@ -709,6 +869,21 @@ async def main():
             month = r.get("month", "?")
             print(f"  {month:<10} {sym:<10} {trades:<8} {wr:<7.1f}% "
                   f"${pnl:<9.2f} {pf:<8.2f} {dd:<7.1f}% {rr:<8.2f}")
+
+    if args.debug and all_trade_logs:
+        # Group by symbol and analyze
+        from collections import defaultdict
+        by_symbol = defaultdict(list)
+        for t in all_trade_logs:
+            by_symbol[t["symbol"]].append(t)
+        for sym, logs in by_symbol.items():
+            analyze_trades(logs, sym)
+
+        # Save raw trade log to file
+        filename = f"debug_trades_{'_'.join(symbols)}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+        with open(filename, "w") as f:
+            json.dump(all_trade_logs, f, indent=2, default=str)
+        print(f"\n  Trade log saved to {filename}")
 
     print()
     print(f"  Script complete.")

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Dict, List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from loguru import logger
 
@@ -38,7 +38,7 @@ SYNC_INTERVAL_SECONDS = 30  # Check every 30 seconds
 @dataclass
 class SyncResult:
     """Result of a single sync cycle."""
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     exchange_positions_checked: int = 0
     demo_positions_checked: int = 0
     positions_closed_from_exchange_sl: int = 0
@@ -70,13 +70,13 @@ async def sync_positions(
         SyncResult with details of what was reconciled
     """
     result = SyncResult()
-    result.timestamp = current_time or datetime.utcnow()
+    result.timestamp = current_time or datetime.now(timezone.utc)
 
     if not live_executor or not live_executor.exchange:
         result.errors.append("No exchange connection available")
         return result
 
-    now = current_time or datetime.utcnow()
+    now = current_time or datetime.now(timezone.utc)
 
     try:
         # Step 1: Fetch exchange positions
@@ -367,7 +367,7 @@ async def sync_worker(
             stats["total_closed_from_tp"] += result.positions_closed_from_exchange_tp
             stats["total_closed_from_manual"] += result.positions_closed_from_exchange_manual
             stats["total_errors"] += len(result.errors)
-            stats["last_sync_time"] = result.timestamp.isoformat() + "Z"
+            stats["last_sync_time"] = result.timestamp.isoformat().replace("+00:00", "Z")
             stats["last_sync_result"] = {
                 "demo_positions": result.demo_positions_checked,
                 "exchange_positions": result.exchange_positions_checked,
