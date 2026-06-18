@@ -68,6 +68,7 @@ _demo_account = DemoAccount(
     symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
     symbol_min_scores={"BTCUSDT": 60, "ETHUSDT": 60},
     spot_only=True,  # Binance Spot — no SHORT trades
+    db_manager=_db,
 )
 
 _live_executor = LiveExecutor(mode=os.getenv("EXCHANGE_MODE", "demo"))
@@ -222,18 +223,45 @@ async def _broadcast_data():
 
 # ── Lifespan ─────────────────────────────────────────────────────────
 
+from database.manager import DatabaseManager
+_db = DatabaseManager()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start background workers on startup, cancel on shutdown."""
+    # Initialize Database
+    await _db.init_db()
+    logger.info("Database initialized.")
+
+    # ── State Recovery ───────────────────────────────────────────────
+    try:
+        last_state = await _db.load_last_state()
+        db_positions = await _db.load_positions()
+        db_trades = await _db.load_trades()
+        
+        if last_state:
+            _demo_account.restore_state(
+                balance=last_state['balance'],
+                peak_balance=last_state['peak_balance'],
+                positions=db_positions,
+                trades=db_trades
+            )
+            # Pre-fill caches
+            global _recent_trades, _performance_cache
+            _recent_trades = _demo_account.get_closed_trades_list(200)
+            _performance_cache = _demo_account.get_performance()
+    except Exception as e:
+        logger.error(f"Failed to restore state from DB: {e}")
+
     # Crypto data worker (Binance WebSockets, Real-time)
     crypto_task = asyncio.create_task(_crypto_data_worker())
     _background_tasks.append(crypto_task)
     logger.info("Crypto data worker started (Binance WebSockets, Real-time).")
 
-    # HTF bias worker (Binance 1h data, every 15 min)
+    # HTF bias worker (Binance 1h WebSockets, Real-time)
     bias_task = asyncio.create_task(_htf_bias_worker())
     _background_tasks.append(bias_task)
-    logger.info("HTF bias worker started (Binance 1h, 15min cycle).")
+    logger.info("HTF bias worker started (Binance 1h WebSockets, Real-time).")
 
     # Exchange sync worker (reconciles every 30s)
     if _live_executor and _live_executor.exchange:
@@ -484,12 +512,28 @@ async def _crypto_data_worker():
                         htf_bias=htf_bias,
                     )
                     
+                    # Persist signals to DB
+                    for sig in result.get("signals", []):
+                        db_sig = sig.copy()
+                        ts = db_sig.get("timestamp")
+                        if isinstance(ts, datetime):
+                            db_sig["timestamp"] = ts.replace(tzinfo=None)
+                        asyncio.ensure_future(_db.save_signal(db_sig))
+
                     # Update global state
                     _recent_signals = result.get("signals", []) + _recent_signals
                     if len(_recent_signals) > 500:
                         _recent_signals = _recent_signals[:500]
                     _recent_trades = result.get("trades", [])
                     _performance_cache = result.get("performance", {})
+
+                    # Persist account state
+                    perf = result.get("performance", {})
+                    asyncio.ensure_future(_db.update_account_state(
+                        balance=perf.get("capital_remaining", 0),
+                        equity=perf.get("equity", perf.get("capital_remaining", 0)),
+                        peak_balance=perf.get("peak_balance", 0)
+                    ))
 
                     _health["total_signals_generated"] = _orchestrator.total_signals_generated
                     _health["total_signals_kept"] = _orchestrator.total_signals_kept
@@ -522,35 +566,47 @@ async def _crypto_data_worker():
 
 async def _htf_bias_worker():
     """
-    Fetches 1h data from Binance every 15min and updates HTF bias via EMA.
+    Uses Binance WebSockets (via CCXT Pro) for real-time HTF bias (1H candles).
+    Updates HTF bias via EMA crossover the second it happens.
     """
+    import ccxt.pro as ccxtpro
+    exchange = ccxtpro.binance({
+        "enableRateLimit": True,
+        "options": {"defaultType": "spot"}
+    })
+    
     while True:
         try:
-            candles = await _binance_fetch_candles("BTCUSDT", "1H", 168)
-            if candles and len(candles) >= 26:
-                df_htf = pl.DataFrame(candles)
-                htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
-                df_swings = _ict_ms.detect_swings(df_htf)
-                swing_bias = determine_bias_from_swings(df_swings)
-                logger.info(f"[Bias] HTF: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}, {len(candles)} candles")
-                _health["htf_bias"] = htf_bias
-                asyncio.ensure_future(_broadcast_data())
-            elif candles and len(candles) >= 8:
-                df_htf = pl.DataFrame(candles)
+            # watchOHLCV for 1H timeframe
+            ohlcvs = await exchange.watch_ohlcv("BTCUSDT", "1h")
+            if not ohlcvs or len(ohlcvs) < 26:
+                continue
+            
+            df_htf = pl.DataFrame([
+                {"timestamp": c[0], "open": c[1], "high": c[2], "low": c[3], "close": c[4], "volume": c[5]}
+                for c in ohlcvs
+            ])
+            
+            htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+            
+            # Fallback to swing bias if EMA is neutral but we have enough data
+            if htf_bias == "neutral" and len(ohlcvs) >= 8:
                 df_swings = _ict_ms.detect_swings(df_htf)
                 htf_bias = determine_bias_from_swings(df_swings)
+            
+            if htf_bias != _health.get("htf_bias"):
+                logger.info(f"[Bias] HTF Shift Detected: {htf_bias.upper()}")
                 _health["htf_bias"] = htf_bias
                 asyncio.ensure_future(_broadcast_data())
-                logger.info(f"[Bias] HTF: {htf_bias.upper()} (swing fallback, {len(candles)} candles)")
-            else:
-                logger.warning(f"[Bias] Not enough data ({len(candles) if candles else 0} candles), keeping current")
+                
+        except asyncio.CancelledError:
+            break
         except Exception as e:
-            logger.warning(f"[Bias] Update failed: {e}")
-            _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            _health["last_error_message"] = f"Bias: {e}"
+            logger.warning(f"[Bias] WS Update failed: {e}")
+            await asyncio.sleep(5)
+    
+    await exchange.close()
 
-        _health["status"] = "running"
-        await asyncio.sleep(900)
 
 
 async def _sync_worker():
@@ -847,6 +903,32 @@ async def get_demo_account():
         "current_drawdown_pct": _performance_cache.get("current_drawdown_pct", 0.0) if _performance_cache else 0.0,
         "open_positions_count": _performance_cache.get("open_positions_count", 0) if _performance_cache else 0,
         "open_positions": _performance_cache.get("open_positions", []) if _performance_cache else [],
+    }
+
+
+@app.get("/api/diagnostics")
+async def get_diagnostics():
+    """Detailed system diagnostics for the dashboard."""
+    return {
+        "websocket": {
+            "status": _health.get("status"),
+            "data_source": _health.get("data_sources", [])[0],
+            "last_cycle": _health.get("last_cycle_time"),
+            "cycle_count": _health.get("cycle_count"),
+        },
+        "bias": {
+            "htf_bias": _health.get("htf_bias"),
+            "btc_price": _latest_prices.get("BTCUSDT"),
+            "eth_price": _latest_prices.get("ETHUSDT"),
+        },
+        "database": {
+            "connected": True, # Managed by SQLAlchemy aiosqlite
+            "total_trades": len(_recent_trades),
+        },
+        "risk": {
+            "daily_loss_pct": _performance_cache.get("current_drawdown_pct", 0),
+            "open_positions": _health.get("total_trades_executed", 0),
+        }
     }
 
 

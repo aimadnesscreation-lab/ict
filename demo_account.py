@@ -61,7 +61,8 @@ class DemoAccount:
                  fixed_sl_pct: float = 0.0,
                  symbol_sl_multipliers: Optional[Dict[str, float]] = None,
                  symbol_min_scores: Optional[Dict[str, int]] = None,
-                 spot_only: bool = False):
+                 spot_only: bool = False,
+                 db_manager=None):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
@@ -74,6 +75,7 @@ class DemoAccount:
         self.symbol_sl_multipliers = symbol_sl_multipliers or {}  # per-symbol ATR multiplier overrides
         self.symbol_min_scores = symbol_min_scores or {}  # per-symbol score threshold overrides
         self.spot_only = spot_only  # If True, SKIP all SHORT signals (for Binance Spot)
+        self.db = db_manager
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
@@ -286,10 +288,25 @@ class DemoAccount:
             for t in trades
         ]
 
-    @property
-    def daily_loss(self) -> float:
-        """Return the running daily loss amount (positive = losing money, 0 = breakeven/profitable)."""
-        return -self._daily_pnl if self._daily_pnl < 0 else 0.0
+    def restore_state(self, balance: float, peak_balance: float, 
+                      positions: List[Dict], trades: List[Dict]):
+        """Recover state from database on startup."""
+        self.balance = balance
+        self.equity = balance
+        self._peak_balance = peak_balance
+        
+        # Restore positions
+        for p in positions:
+            p.pop('_sa_instance_state', None)
+            symbol = p['symbol']
+            self.open_positions[symbol] = OpenPosition(**p)
+            
+        # Restore trades
+        for t in trades:
+            t.pop('_sa_instance_state', None)
+            self.closed_trades.append(ClosedTrade(**t))
+            
+        logger.info(f"DemoAccount restored: ${balance:.2f} balance, {len(positions)} positions, {len(trades)} trades.")
 
     def get_account_summary(self) -> Dict:
         """Return account overview for the dashboard."""
@@ -361,6 +378,24 @@ class DemoAccount:
             atr=atr_value,
         )
         self.open_positions[symbol] = pos
+        
+        # Persist to DB
+        if self.db:
+            import asyncio
+            db_pos = {
+                "symbol": pos.symbol,
+                "side": pos.side,
+                "signal_type": pos.signal_type,
+                "entry_time": pos.entry_time.replace(tzinfo=None),
+                "entry_price": pos.entry_price,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "quantity": pos.quantity,
+                "risk_amount": pos.risk_amount,
+                "atr": pos.atr
+            }
+            asyncio.ensure_future(self.db.save_position(db_pos))
+
         return pos
 
     def _check_position(self, pos: OpenPosition, current_price: float,
@@ -433,6 +468,29 @@ class DemoAccount:
             exit_reason=exit_reason,
         )
         self.closed_trades.append(trade)
+        
+        # Persist to DB
+        if self.db:
+            import asyncio
+            db_trade = {
+                "symbol": trade.symbol,
+                "signal_type": trade.signal_type,
+                "side": trade.side,
+                "entry_time": trade.entry_time.replace(tzinfo=None),
+                "exit_time": trade.exit_time.replace(tzinfo=None),
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "stop_loss": trade.stop_loss,
+                "take_profit": trade.take_profit,
+                "quantity": trade.quantity,
+                "profit": trade.profit,
+                "profit_pct": trade.profit_pct,
+                "rr": trade.rr,
+                "result": trade.result,
+                "exit_reason": trade.exit_reason
+            }
+            asyncio.ensure_future(self.db.save_trade(db_trade))
+            asyncio.ensure_future(self.db.remove_position(pos.symbol))
 
         # Remove from open positions
         del self.open_positions[pos.symbol]
