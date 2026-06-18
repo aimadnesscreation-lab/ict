@@ -3,7 +3,7 @@ End-to-End Integration Test
 
 Starts the API server, monitors data flow, and verifies:
   1. Server boots and responds to health checks
-  2. OKX data backfill succeeds (candle buffers populated)
+  2. Binance data backfill succeeds (candle buffers populated)
   3. HTF bias is computed
   4. ICT pipeline generates signals on new candle closes
   5. DemoAccount processes signals
@@ -267,9 +267,9 @@ async def main():
                 skip("HTF bias still neutral (may need more 1h data)")
 
             if btc > 0 and eth > 0:
-                ok(f"OKX data flowing: BTC=${btc:,.0f}, ETH=${eth:,.0f}")
+                ok(f"Binance data flowing: BTC=${btc:,.0f}, ETH=${eth:,.0f}")
             else:
-                skip("OKX prices not yet populated")
+                skip("Binance prices not yet populated")
 
             if cycles > 0:
                 ok(f"Background workers active: {cycles} bias cycles")

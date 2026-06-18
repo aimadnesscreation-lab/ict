@@ -60,7 +60,8 @@ class DemoAccount:
                  reentry_cooldown_minutes: int = 60,
                  fixed_sl_pct: float = 0.0,
                  symbol_sl_multipliers: Optional[Dict[str, float]] = None,
-                 symbol_min_scores: Optional[Dict[str, int]] = None):
+                 symbol_min_scores: Optional[Dict[str, int]] = None,
+                 spot_only: bool = False):
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
@@ -72,6 +73,7 @@ class DemoAccount:
         self.fixed_sl_pct = fixed_sl_pct
         self.symbol_sl_multipliers = symbol_sl_multipliers or {}  # per-symbol ATR multiplier overrides
         self.symbol_min_scores = symbol_min_scores or {}  # per-symbol score threshold overrides
+        self.spot_only = spot_only  # If True, SKIP all SHORT signals (for Binance Spot)
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
         self._peak_balance = initial_balance
@@ -154,6 +156,10 @@ class DemoAccount:
                 side = "LONG"
             elif "SELL" in signal_type:
                 side = "SHORT"
+                # Spot-only mode: reject ALL SHORT signals
+                if self.spot_only:
+                    logger.info(f"Spot-only: skipping SHORT {symbol} {signal_type} — spot only supports LONG")
+                    continue
             else:
                 continue
 

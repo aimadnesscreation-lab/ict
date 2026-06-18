@@ -6,9 +6,17 @@ import Signals from './pages/Signals';
 import Charts from './pages/Charts';
 import TradeLog from './pages/TradeLog';
 import RiskCenter from './pages/RiskCenter';
-import Settings from './pages/Settings';
+import SettingsPage from './pages/Settings';
 
-const queryClient = new QueryClient();
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 1,
+      refetchOnWindowFocus: false,
+      staleTime: 5_000,
+    },
+  },
+});
 
 function App() {
   const [activePage, setActivePage] = useState('Overview');
@@ -20,13 +28,8 @@ function App() {
       case 'Charts': return <Charts />;
       case 'TradeLog': return <TradeLog />;
       case 'Risk': return <RiskCenter />;
-      case 'Settings': return <Settings />;
-      default:
-        return (
-          <div className="h-full flex items-center justify-center text-slate-500">
-            {activePage} module coming soon...
-          </div>
-        );
+      case 'Settings': return <SettingsPage />;
+      default: return <Overview />;
     }
   };
 

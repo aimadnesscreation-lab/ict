@@ -1,7 +1,7 @@
 """
 12-Month Rolling Backtest — One Month at a Time
 
-Fetches 30 days of 5m data per month via OKX history API (direct, no
+Fetches 30 days of 5m data per month via Binance klines API (direct, no
 intermediary server), drives DemoAccount candle-by-candle matching live
 system logic exactly.
 
@@ -30,14 +30,11 @@ from ict_engine.order_blocks import OrderBlockDetector
 from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
-from ict_engine.breaker_block import BreakerBlockDetector
 from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
 from demo_account import DemoAccount, ClosedTrade
 import json
 
 # ── Data source mapping ────────────────────────────────────────────
-OKX_SYMBOL_MAP = {"BTCUSDT": "BTC-USDT", "ETHUSDT": "ETH-USDT"}
-OKX_BAR_CAPACITY: Dict[str, int] = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}
 BINANCE_BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT"]
@@ -51,86 +48,15 @@ _ict_ob = OrderBlockDetector()
 _ict_liquidity = LiquidityDetector(atr_threshold=0.10)
 _ict_sessions = SessionDetector()
 _ict_pd = PremiumDiscountDetector()
-_ict_breaker = BreakerBlockDetector()
 _signal_engine = SignalEngine()
-
-
-async def _okx_fetch_history(symbol: str, bar: str, limit: int = 100,
-                              after: Optional[datetime] = None) -> Optional[List[Dict]]:
-    """Fetch historical candles from OKX history-candles endpoint (up to 100 per page)."""
-    inst_id = OKX_SYMBOL_MAP.get(symbol)
-    if not inst_id:
-        return None
-    url = "https://www.okx.com/api/v5/market/history-candles"
-    params = {"instId": inst_id, "bar": bar, "limit": str(min(limit, 100))}
-    if after:
-        params["after"] = str(int(after.timestamp() * 1000))
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                logger.warning(f"[OKX] History HTTP {resp.status_code} for {symbol} {bar}")
-                return None
-            data = resp.json()
-            if data.get("code") != "0":
-                logger.warning(f"[OKX] History API error {data.get('code')} for {symbol} {bar}")
-                return None
-            candles = data.get("data", [])
-            result = []
-            for c in reversed(candles):
-                result.append({
-                    "timestamp": datetime.fromtimestamp(int(c[0]) / 1000),
-                    "open": float(c[1]), "high": float(c[2]),
-                    "low": float(c[3]), "close": float(c[4]),
-                    "volume": float(c[5]),
-                })
-            return result
-    except Exception as e:
-        logger.warning(f"[OKX] History fetch failed for {symbol} {bar}: {e}")
-        return None
-
-
-async def _binance_fetch_history(symbol: str, bar: str, limit: int = 1000,
-                                 end_time: Optional[datetime] = None) -> Optional[List[Dict]]:
-    """Fetch historical candles from Binance klines API (up to 1000 per page)."""
-    interval = BINANCE_BAR_MAP.get(bar)
-    if not interval:
-        return None
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": str(min(limit, 1000))}
-    if end_time:
-        params["endTime"] = str(int(end_time.timestamp() * 1000))
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(url, params=params)
-            if resp.status_code != 200:
-                return None
-            klines = resp.json()
-            if not isinstance(klines, list) or len(klines) == 0:
-                return None
-            result = []
-            for k in klines:
-                result.append({
-                    "timestamp": datetime.fromtimestamp(int(k[0]) / 1000),
-                    "open": float(k[1]), "high": float(k[2]),
-                    "low": float(k[3]), "close": float(k[4]),
-                    "volume": float(k[5]),
-                })
-            return result  # Binance returns oldest-first
-    except Exception as e:
-        logger.debug(f"[Binance] History fetch failed for {symbol} {bar}: {e}")
-        return None
 
 
 async def fetch_historical_data(symbol: str, bar: str, days: int,
                                  before: Optional[str] = None) -> pl.DataFrame:
-    """Fetch paginated historical data from OKX, falling back to Binance.
+    """Fetch paginated historical data from Binance REST API.
 
-    Tries OKX history API first (100 per page). If that fails (e.g. blocked
-    network), falls back to Binance klines API (1000 per page). Both are
-    public endpoints — no API key needed.
-
-    Paginates internally, deduplicates, and returns a sorted Polars DataFrame.
+    Uses Binance klines endpoint (1000 per page). Public endpoint —
+    no API key needed. Paginates, deduplicates, returns sorted Polars DataFrame.
 
     Args:
         symbol: BTCUSDT or ETHUSDT
@@ -139,63 +65,58 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
         before: ISO date string to end the window (e.g. "2025-06-15").
                 Defaults to now.
     """
-    per_day = OKX_BAR_CAPACITY.get(bar, 288)
+    interval = BINANCE_BAR_MAP.get(bar)
+    if not interval:
+        return pl.DataFrame()
+
+    per_day = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}.get(bar, 288)
     total_needed = days * per_day
 
-    # Parse the end-of-window timestamp
     end_ts = None
     if before:
         before_clean = before.replace("Z", "+00:00") if isinstance(before, str) else before
         end_ts = datetime.fromisoformat(before_clean)
 
-    # ── Try OKX first ─────────────────────────────────────────────────
-    after_ts = end_ts
-    okx_candles: List[Dict] = []
-    logger.info(f"  [Data] Fetching {symbol} {bar} ({days}d) — trying OKX first...")
-    while len(okx_candles) < total_needed:
-        batch = await _okx_fetch_history(symbol, bar, 100, after=after_ts)
-        if not batch:
-            break
-        okx_candles.extend(batch)
-        after_ts = batch[0]["timestamp"]  # oldest in this batch
-        await asyncio.sleep(0.15)
-
-    if okx_candles:
-        seen = set()
-        deduped = []
-        for c in okx_candles:
-            key = c["timestamp"].timestamp()
-            if key not in seen:
-                seen.add(key)
-                deduped.append(c)
-        deduped.sort(key=lambda c: c["timestamp"])
-        deduped = deduped[:total_needed]
-        df = pl.DataFrame(deduped).sort("timestamp")
-        label = f" before {before}" if before else ""
-        logger.info(f"  [OKX] Fetched {len(df)} {bar} candles for {symbol} ({days}d{label})")
-        return df
-
-    logger.info(f"  [Data] OKX unavailable, falling back to Binance...")
-
-    # ── Fall back to Binance ──────────────────────────────────────────
-    binance_candles: List[Dict] = []
+    all_candles: List[Dict] = []
     page_end = end_ts
-    while len(binance_candles) < total_needed:
-        batch = await _binance_fetch_history(symbol, bar, 1000, end_time=page_end)
-        if not batch or len(batch) == 0:
-            break
-        # Add newest-first, then we'll reverse at the end
-        binance_candles.extend(batch)
-        page_end = batch[0]["timestamp"]  # oldest in this batch
-        await asyncio.sleep(0.1)
+    url = "https://api.binance.com/api/v3/klines"
 
-    if not binance_candles:
-        logger.warning(f"[Data] Both OKX and Binance failed for {symbol} {bar}")
+    while len(all_candles) < total_needed:
+        params = {"symbol": symbol, "interval": interval, "limit": "1000"}
+        if page_end:
+            params["endTime"] = str(int(page_end.timestamp() * 1000))
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, params=params)
+                if resp.status_code != 200:
+                    break
+                klines = resp.json()
+                if not isinstance(klines, list) or len(klines) == 0:
+                    break
+
+                batch = []
+                for k in klines:
+                    batch.append({
+                        "timestamp": datetime.fromtimestamp(int(k[0]) / 1000),
+                        "open": float(k[1]), "high": float(k[2]),
+                        "low": float(k[3]), "close": float(k[4]),
+                        "volume": float(k[5]),
+                    })
+                all_candles.extend(batch)
+                page_end = batch[0]["timestamp"]  # oldest in this batch
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.warning(f"[Binance] History fetch failed for {symbol} {bar}: {e}")
+            break
+
+    if not all_candles:
+        logger.warning(f"[Binance] No data fetched for {symbol} {bar} ({days}d)")
         return pl.DataFrame()
 
     seen = set()
     deduped = []
-    for c in binance_candles:
+    for c in all_candles:
         key = c["timestamp"].timestamp()
         if key not in seen:
             seen.add(key)
@@ -223,7 +144,6 @@ def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
     df = _ict_liquidity.detect_all(df)
     df = _ict_sessions.detect_sessions(df)
     df = _ict_pd.compute_zones(df)
-    df = _ict_breaker.detect_breaker_blocks(df)
     return df
 
 

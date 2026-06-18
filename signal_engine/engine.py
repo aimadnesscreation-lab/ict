@@ -2,7 +2,6 @@ import polars as pl
 from typing import Dict, List, Optional
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
-from ict_engine.breaker_block import BreakerBlockDetector
 
 
 def determine_bias_from_swings(df: pl.DataFrame) -> str:
@@ -128,7 +127,6 @@ class SignalEngine:
         }
         self.session_detector = SessionDetector()
         self.pd_detector = PremiumDiscountDetector()
-        self.breaker_detector = BreakerBlockDetector()
 
     def generate_signal(
         self,

@@ -142,7 +142,7 @@ describe('usePriceStream', () => {
   it('should create a WebSocket connection on mount', () => {
     renderHook(() => usePriceStream());
     const ws = getWs();
-    expect(ws.url).toBe('ws://localhost:8000/ws/prices');
+    expect(ws.url).toBe('ws://localhost:3000/ws/prices');
   });
 
   it('should set connected to true when WebSocket opens', () => {

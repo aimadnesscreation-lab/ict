@@ -40,7 +40,7 @@ async def test_connection():
     global PASS, FAIL
 
     mode = os.getenv("EXCHANGE_MODE", "demo")
-    exchange_name = os.getenv("EXCHANGE_NAME", "binance").lower()
+    exchange_name = "binance"  # Binance only
 
     print(f"\n{'='*60}")
     print(f"  BINANCE DEMO TRADING — CONNECTION TEST")
@@ -57,7 +57,7 @@ async def test_connection():
         print("\n  Make sure .env file contains:")
         print("    BINANCE_API_KEY=your_key")
         print("    BINANCE_SECRET=your_secret")
-        print(f"  Or set EXCHANGE_NAME=okx and OKX_API_KEY/OKX_SECRET/OKX_PASSPHRASE\n")
+        print(f"  Check your .env file has BINANCE_API_KEY and BINANCE_SECRET set.\n")
         return
     ok(f"LiveExecutor created for {exchange_name.upper()}")
 

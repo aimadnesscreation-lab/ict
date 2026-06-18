@@ -1,70 +1,75 @@
-import React, { useEffect, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { createChart, ColorType, CandlestickSeries } from 'lightweight-charts';
 import type { CandlestickData } from 'lightweight-charts';
 
 interface ICTChartProps {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  data: CandlestickData[] & Array<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fvgs?: any[];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  orderBlocks?: any[];
+  data: CandlestickData[];
+  symbol?: string;
 }
 
-const ICTChart: React.FC<ICTChartProps> = ({ data, fvgs = [], orderBlocks = [] }) => {
-  const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<any>(null);
+export default function ICTChart({ data, symbol }: ICTChartProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!chartContainerRef.current) return;
+    if (!containerRef.current) return;
 
-    const chart = createChart(chartContainerRef.current, {
+    const chart = createChart(containerRef.current, {
       layout: {
-        background: { type: ColorType.Solid, color: '#020617' },
+        background: { type: ColorType.Solid, color: '#0f172a' },
         textColor: '#94a3b8',
       },
       grid: {
         vertLines: { color: '#1e293b' },
         horzLines: { color: '#1e293b' },
       },
-      width: chartContainerRef.current.clientWidth,
-      height: 500,
+      width: containerRef.current.clientWidth,
+      height: Math.max(450, containerRef.current.clientHeight || 450),
       timeScale: {
         timeVisible: true,
         secondsVisible: false,
+        borderColor: '#334155',
+      },
+      rightPriceScale: {
+        borderColor: '#334155',
+        scaleMargins: { top: 0.05, bottom: 0.1 },
+      },
+      crosshair: {
+        mode: 0,
+        vertLine: { color: '#6366f1', width: 1, style: 2, labelBackgroundColor: '#6366f1' },
+        horzLine: { color: '#6366f1', width: 1, style: 2, labelBackgroundColor: '#6366f1' },
       },
     });
 
-    const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#10b981',
-      downColor: '#f43f5e',
-      borderVisible: false,
-      wickUpColor: '#10b981',
-      wickDownColor: '#f43f5e',
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: '#22c55e',
+      downColor: '#ef4444',
+      borderUpColor: '#22c55e',
+      borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e',
+      wickDownColor: '#ef4444',
     });
 
-    candlestickSeries.setData(data);
-
-    // FVG overlays are ready for future implementation
-    // Each FVG would be drawn as a horizontal band using a LineSeries or Rectangle primitive
-
-    chartRef.current = chart;
+    series.setData(data);
+    chart.timeScale().fitContent();
 
     const handleResize = () => {
-      if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      if (containerRef.current) {
+        chart.applyOptions({ width: containerRef.current.clientWidth });
       }
     };
-
     window.addEventListener('resize', handleResize);
 
     return () => {
       window.removeEventListener('resize', handleResize);
       chart.remove();
     };
-  }, [data, fvgs, orderBlocks]);
+  }, [data, symbol]);
 
-  return <div ref={chartContainerRef} className="w-full h-full rounded-xl overflow-hidden border border-slate-800" />;
-};
-
-export default ICTChart;
+  return (
+    <div
+      ref={containerRef}
+      className="w-full rounded-xl overflow-hidden"
+      style={{ minHeight: 450, height: '100%' }}
+    />
+  );
+}

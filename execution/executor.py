@@ -1,9 +1,9 @@
 """
-Live Execution Engine — Binance Spot Demo Trading.
+Binance Spot Trading Engine.
 
-Supports Binance Demo Trading Portal with fallback to Testnet.
+Connects to Binance Spot (Demo Trading Portal or Testnet) via CCXT.
 Handles symbol conversion (BTCUSDT → BTC/USDT), amount precision,
-and balance-based position tracking.
+OCO order placement, and balance-based position tracking.
 
 Usage:
     executor = LiveExecutor(mode="demo")
@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# Symbols tracked by the executor (matches api/main.py TRACKED_SYMBOLS)
 TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
 
@@ -48,14 +47,14 @@ def denormalize_symbol(market_symbol: str) -> str:
 
 class LiveExecutor:
     """
-    Live Execution Engine — Spot Trading.
+    Live Execution Engine — Binance Spot Trading.
 
-    Supports Binance Spot (Demo Trading Portal + Testnet) and OKX Spot.
-    Uses market orders for entry, with attached stop-loss and take-profit orders.
+    Connects to Binance Spot (Demo Trading Portal or Testnet) via CCXT.
+    Uses market orders for entry with OCO (One-Cancels-Other) stop-loss
+    and take-profit orders.
 
-    IMPORTANT: Spot trading only supports LONG positions. SHORT signals are
-    skipped with a warning. For SHORT positions, margin or futures would be
-    needed (not currently implemented).
+    SPOT ONLY: Only supports LONG positions. SHORT signals are filtered
+    upstream by the TradingOrchestrator.
 
     For Binance Spot:
       - quantity is in base currency (e.g. BTC for BTC/USDT)
@@ -65,26 +64,20 @@ class LiveExecutor:
 
     def __init__(self, mode: str = "demo"):
         self.mode = mode.lower()
-        self.exchange_name = os.getenv("EXCHANGE_NAME", "binance").lower()
+        self.exchange_name = "binance"
         self._markets_loaded = False
 
-        # Load credentials based on exchange
-        if self.exchange_name == "binance":
-            self.api_key = os.getenv("BINANCE_API_KEY")
-            self.secret = os.getenv("BINANCE_SECRET")
-            self.passphrase = None
-        else:
-            self.api_key = os.getenv("OKX_API_KEY")
-            self.secret = os.getenv("OKX_SECRET")
-            self.passphrase = os.getenv("OKX_PASSPHRASE")
+        # Load Binance credentials
+        self.api_key = os.getenv("BINANCE_API_KEY")
+        self.secret = os.getenv("BINANCE_SECRET")
+        self.passphrase = None
 
-        if not all([self.api_key, self.secret]) or (self.exchange_name == "okx" and not self.passphrase):
-            logger.warning(f"Execution: Missing {self.exchange_name.upper()} credentials in environment.")
+        if not all([self.api_key, self.secret]):
+            logger.warning("Execution: Missing BINANCE_API_KEY / BINANCE_SECRET in environment.")
             self.exchange = None
             return
 
-        # Initialize CCXT instance — always spot mode
-        exchange_class = getattr(ccxt, self.exchange_name)
+        # Initialize CCXT Binance instance — spot mode
         config = {
             'apiKey': self.api_key,
             'secret': self.secret,
@@ -93,28 +86,20 @@ class LiveExecutor:
                 'defaultType': 'spot',
             }
         }
-        if self.passphrase:
-            config['password'] = self.passphrase
 
-        self.exchange = exchange_class(config)
+        self.exchange = ccxt.binance(config)
 
         # Enable Demo/Sandbox mode
         if self.mode == "demo":
-            if self.exchange_name == "binance":
-                # Binance Demo Trading Portal (CCXT 4.5.6+)
-                self.exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
-                if hasattr(self.exchange, 'enable_demo_trading'):
-                    self.exchange.enable_demo_trading(True)
-                    logger.info("Execution: Binance Demo Trading Portal enabled (Spot).")
-                else:
-                    # Fallback to legacy testnet
-                    self.exchange.set_sandbox_mode(True)
-                    logger.info("Execution: Binance Testnet mode enabled (Spot, fallback).")
+            self.exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
+            if hasattr(self.exchange, 'enable_demo_trading'):
+                self.exchange.enable_demo_trading(True)
+                logger.info("Execution: Binance Demo Trading Portal enabled (Spot).")
             else:
                 self.exchange.set_sandbox_mode(True)
-                logger.info(f"Execution: Initialized in {self.exchange_name.upper()} SPOT DEMO mode.")
+                logger.info("Execution: Binance Testnet mode enabled (Spot, fallback).")
         else:
-            logger.info(f"Execution: Initialized in {self.exchange_name.upper()} SPOT LIVE mode.")
+            logger.info("Execution: Binance SPOT LIVE mode (use with caution).")
 
     # ── Market Info ───────────────────────────────────────────────────
 
