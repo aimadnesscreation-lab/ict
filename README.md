@@ -206,21 +206,75 @@ Deploy the platform instantly with zero configuration.
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
-pip install sqlalchemy aiosqlite
 
 # 2. Set environment
-cp .env.example .env # Add your Binance API keys
+cp .env.example .env  # Add your Binance API keys
 
-# 3. Start the API
-uvicorn api.main:app --port 8000
+# 3. Start everything (API + Dashboard) with one command
+chmod +x start.sh
+./start.sh
 ```
 
-### Dashboard
+The script will create a virtual environment, install all deps, verify your connection, and start both the API server (port 8000) and Vite dev server (port 5173). Press `Ctrl+C` to stop both.
+
+### Dashboard (standalone)
 ```bash
 cd dashboard
 npm install
 npm run dev          # dev server at http://localhost:5173
 ```
+
+### Running in the Background
+
+Keep the platform running 24/7 without an open terminal:
+
+#### Option 1: `nohup` (quickest)
+```bash
+cd ~/Documents/ict
+nohup ./start.sh > trading.log 2>&1 &
+```
+Logs stream to `trading.log`. To stop:
+```bash
+pkill -f uvicorn
+pkill -f vite
+```
+
+#### Option 2: `tmux` (best for monitoring)
+```bash
+# Start a detached session
+tmux new-session -d -s trading './start.sh'
+
+# Reattach to see logs
+tmux attach -t trading
+# Detach with Ctrl+B then D
+
+# Stop the session
+tmux kill-session -t trading
+```
+
+#### Option 3: `systemd` service (auto-start on boot)
+```bash
+sudo tee /etc/systemd/system/trading.service << 'EOF'
+[Unit]
+Description=ICT Trading Platform
+After=network.target
+
+[Service]
+Type=simple
+User=zainu
+WorkingDirectory=/home/zainu/Documents/ict
+ExecStart=/home/zainu/Documents/ict/venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now trading.service
+```
+This runs only the API (no dashboard dev server). Access the pre-built dashboard at `http://localhost:8000/dashboard/`.
 
 ---
 
