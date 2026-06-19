@@ -230,7 +230,7 @@ Keep the platform running 24/7 without an open terminal:
 
 #### Option 1: `nohup` (quickest)
 ```bash
-cd ~/Documents/ict
+cd /path/to/ict
 nohup ./start.sh > trading.log 2>&1 &
 ```
 Logs stream to `trading.log`. To stop:
@@ -254,6 +254,7 @@ tmux kill-session -t trading
 
 #### Option 3: `systemd` service (auto-start on boot)
 ```bash
+# Replace YOUR_USER with your Linux username and edit the WorkingDirectory/ExecStart paths
 sudo tee /etc/systemd/system/trading.service << 'EOF'
 [Unit]
 Description=ICT Trading Platform
@@ -261,9 +262,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=zainu
-WorkingDirectory=/home/zainu/Documents/ict
-ExecStart=/home/zainu/Documents/ict/venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/ict
+ExecStart=/home/YOUR_USER/ict/venv/bin/uvicorn api.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=10
 
