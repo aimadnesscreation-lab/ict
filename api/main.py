@@ -425,7 +425,7 @@ async def _crypto_data_worker():
                 # Timeout after 60s so we can log failures instead of hanging forever
                 ohlcvs = await asyncio.wait_for(
                     exchange.watch_ohlcv(symbol, "5m"),
-                    timeout=60,
+                    timeout=120,
                 )
                 if not ohlcvs:
                     continue
