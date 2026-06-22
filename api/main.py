@@ -499,7 +499,8 @@ async def _crypto_data_worker():
                     asyncio.ensure_future(_broadcast_data())
                 
             except Exception as e:
-                logger.debug(f"[WS] OHLCV error for {symbol}: {e}")
+                logger.warning(f"[WS] OHLCV error for {symbol}: {e}")
+                _health["last_error_message"] = f"OHLCV {symbol}: {e}"
                 await asyncio.sleep(2)
 
     try:
