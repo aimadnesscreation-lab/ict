@@ -422,7 +422,11 @@ async def _crypto_data_worker():
         while True:
             try:
                 # watchOHLCV returns a list of [timestamp, open, high, low, close, volume]
-                ohlcvs = await exchange.watch_ohlcv(symbol, "5m")
+                # Timeout after 60s so we can log failures instead of hanging forever
+                ohlcvs = await asyncio.wait_for(
+                    exchange.watch_ohlcv(symbol, "5m"),
+                    timeout=60,
+                )
                 if not ohlcvs:
                     continue
                 
@@ -500,8 +504,9 @@ async def _crypto_data_worker():
                 
             except Exception as e:
                 logger.warning(f"[WS] OHLCV error for {symbol}: {e}")
+                _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 _health["last_error_message"] = f"OHLCV {symbol}: {e}"
-                await asyncio.sleep(2)
+                await asyncio.sleep(10)
 
     try:
         # Run ticker watcher and OHLCV watchers in parallel
