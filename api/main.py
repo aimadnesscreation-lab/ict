@@ -321,7 +321,7 @@ async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Opt
             result = []
             for k in klines:
                 result.append({
-                    "timestamp": datetime.fromtimestamp(int(k[0]) / 1000),
+                    "timestamp": datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).replace(tzinfo=None),
                     "open": float(k[1]), "high": float(k[2]),
                     "low": float(k[3]), "close": float(k[4]),
                     "volume": float(k[5]),
@@ -753,7 +753,7 @@ async def get_backtest_data(
                 batch = []
                 for k in klines:
                     batch.append({
-                        "timestamp": datetime.fromtimestamp(int(k[0]) / 1000),
+                        "timestamp": datetime.fromtimestamp(int(k[0]) / 1000, tz=timezone.utc).replace(tzinfo=None),
                         "open": float(k[1]), "high": float(k[2]),
                         "low": float(k[3]), "close": float(k[4]),
                         "volume": float(k[5]),
