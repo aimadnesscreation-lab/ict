@@ -114,7 +114,7 @@ def _serialize_for_ws(obj: object) -> object:
     if isinstance(obj, datetime):
         return obj.isoformat().replace("+00:00", "Z")
     if dataclasses.is_dataclass(obj):
-        return {k: _serialize_for_ws(v) for k, v in dataclasses.asdict(obj).items()}
+        return {k: _serialize_for_ws(v) for k, v in dataclasses.asdict(obj).items()}  # type: ignore[arg-type]
     if isinstance(obj, dict):
         return {k: _serialize_for_ws(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -726,7 +726,8 @@ async def get_backtest_data(
         all_candles: List[Dict] = []
         page_end: Optional[datetime] = None
         if before:
-            before_clean = before.replace("Z", "+00:00") if isinstance(before, str) else before
+            # Replace trailing Z with +00:00 for fromisoformat compatibility
+            before_clean = before.replace("Z", "+00:00")
             page_end = datetime.fromisoformat(before_clean)
 
         while len(all_candles) < total_needed:
@@ -752,7 +753,7 @@ async def get_backtest_data(
                         "volume": float(k[5]),
                     })
                 all_candles.extend(batch)
-                page_end = batch[0]["timestamp"]  # oldest in this batch
+                page_end = batch[0]["timestamp"]  # type: ignore[assignment]
                 await asyncio.sleep(0.1)
 
         if not all_candles:

@@ -21,3 +21,42 @@ dependencies = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = "test_*.py"
+
+[tool.mypy]
+# ── General settings ────────────────────────────────────────────────────
+python_version = "3.12"
+ignore_missing_imports = true
+follow_imports = "skip"
+warn_unused_ignores = true
+warn_redundant_casts = true
+strict_optional = true
+show_error_codes = true
+no_implicit_optional = true
+
+# ── Files to check (listed explicitly so imports are skipped) ──────────
+files = [
+    "ict_engine/",
+    "signal_engine/",
+    "trading_engine/",
+    "execution/",
+    "database/",
+    "discord/",
+    "api/main.py",
+    "demo_account.py",
+    "backtest_okx.py",
+    "test_integration.py",
+    "tests/test_ict_engine.py",
+]
+
+[[tool.mypy.overrides]]
+# Tests use dynamic patterns (pytest fixtures, monkeypatching) that are
+# hard to type strictly. Relax checks a bit for test files.
+module = ["tests.*"]
+ignore_missing_imports = true
+allow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+# Backtest runner uses many dynamic patterns for CLI argument handling
+# and optional print-level debug flags.
+module = "backtest_okx"
+ignore_missing_imports = true

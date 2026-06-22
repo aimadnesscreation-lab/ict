@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from loguru import logger
 
-from demo_account import DemoAccount, ClosedTrade
-from execution.executor import denormalize_symbol
+from demo_account import DemoAccount, ClosedTrade, OpenPosition
+from execution.executor import LiveExecutor, denormalize_symbol
 
 # ── Sync cycle interval ──────────────────────────────────────────────
 SYNC_INTERVAL_SECONDS = 30  # Check every 30 seconds
@@ -235,22 +235,23 @@ async def sync_positions(
 
         # Step 3: Close detected positions in DemoAccount
         for symbol in demo_positions_to_close:
-            pos = demo_account.open_positions.get(symbol)
-            if pos is None:
+            open_pos_for_close = demo_account.open_positions.get(symbol)
+            if open_pos_for_close is None:
                 continue
+            closing_pos: OpenPosition = open_pos_for_close
 
             info = demo_to_close_info[symbol]
             exit_price = info["exit_price"]
             exit_reason = info["exit_reason"]
 
             # Calculate PnL
-            if pos.side == "LONG":
-                profit = (exit_price - pos.entry_price) * pos.quantity
+            if closing_pos.side == "LONG":
+                profit = (exit_price - closing_pos.entry_price) * closing_pos.quantity
             else:
-                profit = (pos.entry_price - exit_price) * pos.quantity
+                profit = (closing_pos.entry_price - exit_price) * closing_pos.quantity
 
-            rr = abs(exit_price - pos.entry_price) / abs(pos.entry_price - pos.stop_loss) \
-                if abs(pos.entry_price - pos.stop_loss) > 0 else 0
+            rr = abs(exit_price - closing_pos.entry_price) / abs(closing_pos.entry_price - closing_pos.stop_loss) \
+                if abs(closing_pos.entry_price - closing_pos.stop_loss) > 0 else 0
             result_type = "WIN" if profit > 0 else ("LOSS" if profit < 0 else "BREAK_EVEN")
 
             # Update DemoAccount balance
@@ -261,22 +262,22 @@ async def sync_positions(
 
             # Track SL for cooldown
             if exit_reason == "STOP_LOSS":
-                demo_account._last_sl[symbol] = {"time": now, "side": pos.side}
+                demo_account._last_sl[symbol] = {"time": now, "side": closing_pos.side}
 
             # Create and record closed trade
             trade = ClosedTrade(
-                symbol=pos.symbol,
-                signal_type=pos.signal_type,
-                side=pos.side,
-                entry_time=pos.entry_time,
+                symbol=closing_pos.symbol,
+                signal_type=closing_pos.signal_type,
+                side=closing_pos.side,
+                entry_time=closing_pos.entry_time,
                 exit_time=now,
-                entry_price=pos.entry_price,
+                entry_price=closing_pos.entry_price,
                 exit_price=exit_price,
-                stop_loss=pos.stop_loss,
-                take_profit=pos.take_profit,
-                quantity=pos.quantity,
+                stop_loss=closing_pos.stop_loss,
+                take_profit=closing_pos.take_profit,
+                quantity=closing_pos.quantity,
                 profit=profit,
-                profit_pct=profit / (pos.entry_price * pos.quantity) if pos.entry_price > 0 and pos.quantity > 0 else 0,
+                profit_pct=profit / (closing_pos.entry_price * closing_pos.quantity) if closing_pos.entry_price > 0 and closing_pos.quantity > 0 else 0,
                 rr=round(rr, 2),
                 result=result_type,
                 exit_reason=f"SYNC_{exit_reason}",
@@ -287,7 +288,7 @@ async def sync_positions(
             del demo_account.open_positions[symbol]
 
             logger.info(
-                f"[Sync] Closed {pos.side} {symbol} via exchange sync: "
+                f"[Sync] Closed {closing_pos.side} {symbol} via exchange sync: "
                 f"{result_type} ({exit_reason}) "
                 f"Profit=${profit:.2f} RR={trade.rr:.2f}"
             )

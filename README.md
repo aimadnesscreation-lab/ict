@@ -21,74 +21,36 @@ A production-grade algorithmic trading platform built on **ICT (Inner Circle Tra
 
 | Metric | BTCUSDT | ETHUSDT | **Combined** |
 |--------|---------|---------|-------------|
-| **Total Trades** | 470 | 846 | **1,316** |
-| **Win Rate** | 41.9% | 38.4% | **39.7%** |
-| **Total P&L** | +$6,413.58 | +$6,919.30 | **+$13,332.88** |
-| **Total Return** | — | — | **+266.7%** |
-| **Avg Monthly P&L** | $534.47 | $576.61 | **$1,111.07** |
-| **Avg R:R** | 1.42 | 1.38 | **1.40** |
-| **Avg Max DD** | 8.0% | 7.6% | **~7.8%** |
+| **Total Trades** | 733 | 998 | **1,731** |
+| **Win Rate** | 42.6% | 40.2% | **41.2%** |
+| **Total P&L** | +$11,220.56 | +$11,115.87 | **+$22,336.43** |
+| **Total Return** | — | — | **+446.7%** |
+| **Avg Monthly P&L** | $935.05 | $926.32 | **$1,861.37** |
+| **Avg R:R** | ~1.40 | ~1.40 | **~1.40** |
+| **Avg Max DD** | ~7.5% | ~8.5% | **~8.0%** |
 
-*Run: `python backtest_okx.py --months 12 --spot --capital 5000`*
+*Run: `python backtest_okx.py --months 12 --spot-only --capital 5000`*
 
 ### Futures-Enabled (LONG + SHORT — Binance Futures) — 12 Months
 
-| Metric | BTCUSDT | ETHUSDT | **Combined** |
-|--------|---------|---------|-------------|
-| **Total Trades** | 1,012 | 1,648 | **2,660** |
-| **Win Rate** | 41.1% | 38.2% | **38.2%** |
-| **Total P&L** | +$8,267.58 | +$14,023.60 | **+$22,291.12** |
-| **Total Return** | — | — | **+445.8%** |
-| **Avg Monthly P&L** | $688.97 | $1,168.63 | **$1,857.59** |
-| **Avg R:R** | 1.40 | 1.38 | **1.39** |
-| **Avg Max DD** | 13.6% | 10.9% | **~12.3%** |
+*Results pending — the HTF alignment fix affects futures results too. Re-run with `python backtest_okx.py --months 12 --capital 5000` to update.*
 
-*Run: `python backtest_okx.py --months 12 --capital 5000`*
+#### Per-Month Breakdown (Spot-Only)
 
-### Spot vs Futures — Trade Quality Comparison
-
-| Metric | **Spot (LONG Only)** | **Futures (LONG+SHORT)** | Delta |
-|--------|:-------------------:|:------------------------:|:-----:|
-| **Total Trades** | 1,316 | 2,660 | **+102%** |
-| **Combined P&L** | **+$13,332.88** | **+$22,291.12** | **+67%** |
-| **Total Return** | **+266.7%** | **+445.8%** | **+179pp** |
-| **Win Rate** | 39.7% | 38.2% | -1.5pp |
-| **Avg R:R** | 1.40 | 1.39 | -0.01 |
-| **Avg Max DD** | 7.8% | 12.3% | **+4.5pp** |
-| **Avg Held (Wins)** | 10 min | 10 min | Same |
-| **Avg Held (Losses)** | 9 min | 9 min | Same |
-| **Avg ATR (BTC)** | $70.91 | $170.93 (SHORT-heavy) | +141% |
-| **Max Consec Losses** | 7–8 | 7–8 | Same |
-| **Trades/Day (BTC)** | 1.3 | 2.8 | +115% |
-| **Trades/Day (ETH)** | 2.3 | 4.5 | +96% |
-
-#### Per-Month Breakdown
-
-| Month | Spot P&L | Futures P&L | Spot Trades | Futures Trades |
-|-------|:-------:|:----------:|:----------:|:-------------:|
-| Jul 2025 | +$1,123.84 | +$1,123.84 | 267 | 267 |
-| Aug 2025 | +$665.22 | +$1,645.91 | 145 | 244 |
-| Sep 2025 | -$26.75 | -$563.77 | 54 | 117 |
-| Oct 2025 | +$365.68 | +$535.04 | 82 | 165 |
-| Nov 2025 | +$1,788.65 | +$1,836.25 | 127 | 230 |
-| Dec 2025 | +$1,842.44 | +$2,578.91 | 208 | 394 |
-| Jan 2026 | +$1,643.84 | +$1,643.84 | 71 | 71 |
-| Feb 2026 | +$805.57 | +$64.44 | 68 | 424 |
-| Mar 2026 | +$4,288.74 | +$4,343.78 | 182 | 275 |
-| Apr 2026 | +$381.42 | +$725.79 | 64 | 123 |
-| May 2026 | +$454.23 | +$642.88 | 48 | 68 |
-| Jun 2026 | $0.00 | +$7,714.21 | 0 | 282 |
-
-#### Key Findings
-
-1. **SHORT trades add 102% more trade volume** but only **67% more profit** — SHORTs are less efficient per-trade than LONGs
-2. **Win rate drops 1.5pp** when including SHORTs (39.7% → 38.2%) — SHORT signals are slightly less reliable
-3. **Max DD increases 4.5pp** (7.8% → 12.3%) — SHORT trades add meaningful tail risk
-4. **R:R is nearly identical** (1.40 vs 1.39) — the strategy's edge is consistent across both directions
-5. **All trades scalp-style**: held 9–12 min average, regardless of direction or symbol
-6. **Consecutive loss streaks are identical** (7–8) — the daily 3% circuit breaker is the real risk control
-7. **June 2026** is the most dramatic gap: BEARISH bias all month. Spot filtered all SHORTs → $0. Futures took 282 SHORT trades → +$7,714.21
-8. **September 2025** is the worst month in both modes: futures lost -$563.77 vs spot -$26.75. The daily 3% circuit breaker saved spot from further damage
+| Month | BTC Trades | BTC WR | BTC P&L | ETH Trades | ETH WR | ETH P&L | Combined P&L |
+|-------|:---------:|:------:|:-------:|:---------:|:------:|:-------:|:-----------:|
+| Jul 2025 | 66 | 39.4% | +$597.35 | 85 | 35.3% | +$210.88 | **+$808.23** |
+| Aug 2025 | 43 | 39.5% | +$391.23 | 217 | 38.7% | +$1,932.11 | **+$2,323.34** |
+| Sep 2025 | 51 | 47.1% | +$1,130.90 | 130 | 43.9% | +$2,422.48 | **+$3,553.38** |
+| Oct 2025 | 174 | 41.4% | +$2,464.01 | 121 | 38.8% | +$1,028.13 | **+$3,492.14** |
+| Nov 2025 | 72 | 40.3% | +$763.53 | 59 | 45.8% | +$1,187.30 | **+$1,950.83** |
+| Dec 2025 | 82 | 50.0% | +$2,457.96 | 74 | 46.0% | +$1,558.18 | **+$4,016.14** |
+| Jan 2026 | 44 | 52.3% | +$1,384.30 | 34 | 29.4% | -$211.31 | **+$1,172.99** |
+| Feb 2026 | 23 | 39.1% | +$191.16 | 33 | 51.5% | +$961.23 | **+$1,152.39** |
+| Mar 2026 | 83 | 41.0% | +$991.01 | 133 | 39.1% | +$1,203.40 | **+$2,194.41** |
+| Apr 2026 | 49 | 36.7% | +$229.55 | 62 | 35.5% | +$171.08 | **+$400.63** |
+| May 2026 | 27 | 55.6% | +$964.79 | 25 | 48.0% | +$564.54 | **+$1,529.33** |
+| Jun 2026 | 19 | 21.1% | -$345.23 | 25 | 36.0% | +$87.85 | **-$257.38** |
 
 ---
 

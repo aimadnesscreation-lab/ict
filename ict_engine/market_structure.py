@@ -61,13 +61,15 @@ class MarketStructure:
         is_bearish_bos = (pl.col("close") < pl.col("last_swing_low").shift(1)) & pl.col("last_swing_low").shift(1).is_not_null()
 
         # MSS logic: Liquidity sweep (low taken) then break high
-        # For simplicity, we track if the current candle is the *first* break after a sweep
-        # Real implementation would track state, here we provide the indicators
+        # MSS = BOS confirmed against the last genuine swing level.
+        # Using shift(1) ensures we compare against the most recent confirmed
+        # swing high/low (forward-filled from the last swing point), not an
+        # arbitrary row offset.
         
-        # Bullish MSS: close > previous swing high (breaks structure upward)
-        is_bullish_mss = is_bullish_bos & (pl.col("close") > pl.col("last_swing_high").shift(2))
-        # Bearish MSS: close < previous swing low (breaks structure downward)
-        is_bearish_mss = is_bearish_bos & (pl.col("close") < pl.col("last_swing_low").shift(2))
+        # Bullish MSS: close > last confirmed swing high (breaks structure upward)
+        is_bullish_mss = is_bullish_bos & (pl.col("close") > pl.col("last_swing_high").shift(1))
+        # Bearish MSS: close < last confirmed swing low (breaks structure downward)
+        is_bearish_mss = is_bearish_bos & (pl.col("close") < pl.col("last_swing_low").shift(1))
 
         return df.with_columns([
             pl.when(is_bullish_bos).then(pl.lit("BULLISH")).when(is_bearish_bos).then(pl.lit("BEARISH")).otherwise(None).alias("bos"),

@@ -18,6 +18,7 @@ import httpx
 import os
 import sys
 import time
+from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -48,7 +49,7 @@ def skip(msg: str):
     print(f"  ⏭️  {msg}")
 
 
-async def check_endpoint(path: str, label: str, timeout: float = 10.0) -> dict:
+async def check_endpoint(path: str, label: str, timeout: float = 10.0) -> Optional[dict]:
     """GET an endpoint and return JSON, or None on failure."""
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -91,9 +92,9 @@ async def monitor_data_flow(duration: int = 180):
     print(f"  MONITORING DATA PIPELINE ({duration}s)")
     print(f"{'='*60}")
 
-    health_snapshots = []
-    signal_counts = []
-    demo_snapshots = []
+    health_snapshots: List[Dict] = []
+    signal_counts: List[int] = []
+    demo_snapshots: List[Dict] = []
 
     # Check every 15 seconds for 'duration' seconds
     for tick in range(0, duration, 15):
@@ -307,7 +308,7 @@ async def main():
             try:
                 server_proc.wait(timeout=10)
                 ok("Server stopped cleanly")
-            except:
+            except Exception:
                 server_proc.kill()
                 fail("Server had to be killed")
                 server_proc.wait()

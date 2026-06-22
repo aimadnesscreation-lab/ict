@@ -194,12 +194,12 @@ class DemoAccount:
             if atr_value <= 0:
                 continue
 
-            pos = self._open_trade(symbol, signal_type, side, price, atr_value, timestamp)
-            if pos:
+            new_pos = self._open_trade(symbol, signal_type, side, price, atr_value, timestamp)
+            if new_pos:
                 logger.info(
                     f"Demo opened {side} {symbol} @ {price:.2f} "
-                    f"SL={pos.stop_loss:.2f} TP={pos.take_profit:.2f} "
-                    f"Qty={pos.quantity:.4f} Risk=${pos.risk_amount:.2f}"
+                    f"SL={new_pos.stop_loss:.2f} TP={new_pos.take_profit:.2f} "
+                    f"Qty={new_pos.quantity:.4f} Risk=${new_pos.risk_amount:.2f}"
                 )
 
         return freshly_closed
@@ -413,8 +413,8 @@ class DemoAccount:
         Check if an open position hit SL or TP.
         Returns a dict if closed, None if still open.
         """
-        exit_reason = None
-        exit_price = None
+        exit_reason: Optional[str] = None
+        exit_price: Optional[float] = None
 
         if pos.side == "LONG":
             if current_price >= pos.take_profit:
@@ -431,18 +431,22 @@ class DemoAccount:
                 exit_reason = "STOP_LOSS"
                 exit_price = pos.stop_loss
 
-        if exit_reason is None:
+        if exit_reason is None or exit_price is None:
             return None
+
+        # At this point mypy can narrow exit_reason/exit_price to str/float
+        ep: float = exit_price
+        er: str = exit_reason
 
         # Calculate PnL
         if pos.side == "LONG":
-            profit = (exit_price - pos.entry_price) * pos.quantity
-            profit_pct = (exit_price - pos.entry_price) / pos.entry_price
+            profit = (ep - pos.entry_price) * pos.quantity
+            profit_pct = (ep - pos.entry_price) / pos.entry_price
         else:
-            profit = (pos.entry_price - exit_price) * pos.quantity
-            profit_pct = (pos.entry_price - exit_price) / pos.entry_price
+            profit = (pos.entry_price - ep) * pos.quantity
+            profit_pct = (pos.entry_price - ep) / pos.entry_price
 
-        rr = abs(exit_price - pos.entry_price) / abs(pos.entry_price - pos.stop_loss) \
+        rr = abs(ep - pos.entry_price) / abs(pos.entry_price - pos.stop_loss) \
             if abs(pos.entry_price - pos.stop_loss) > 0 else 0
 
         result = "WIN" if profit > 0 else ("LOSS" if profit < 0 else "BREAK_EVEN")
@@ -454,7 +458,7 @@ class DemoAccount:
             self._peak_balance = self.balance
 
         # Record stop-loss for cooldown tracking (prevents immediate same-side re-entry)
-        if exit_reason == "STOP_LOSS":
+        if er == "STOP_LOSS":
             self._last_sl[pos.symbol] = {"time": current_time or datetime.now(timezone.utc), "side": pos.side}
 
         now = current_time if current_time is not None else datetime.now(timezone.utc)
@@ -466,7 +470,7 @@ class DemoAccount:
             entry_time=pos.entry_time,
             exit_time=now,
             entry_price=pos.entry_price,
-            exit_price=exit_price,
+            exit_price=ep,
             stop_loss=pos.stop_loss,
             take_profit=pos.take_profit,
             quantity=pos.quantity,
@@ -474,7 +478,7 @@ class DemoAccount:
             profit_pct=profit_pct,
             rr=round(rr, 2),
             result=result,
-            exit_reason=exit_reason,
+            exit_reason=er,
         )
         self.closed_trades.append(trade)
         

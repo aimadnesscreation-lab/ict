@@ -171,10 +171,10 @@ class TradingOrchestrator:
         self.total_signals_generated += len(all_signals)
 
         # ── HTF alignment filter ─────────────────────────────────────
-        if htf_bias != "neutral":
-            all_signals = [s for s in all_signals if s.get("htf_aligned", True)]
-        else:
-            all_signals = []
+        # When bias is neutral (no clear trend), all signals pass through.
+        # When bias is bullish/bearish, only aligned signals are kept.
+        # The signal engine sets htf_aligned=True by default when bias is neutral.
+        all_signals = [s for s in all_signals if s.get("htf_aligned", True)]
 
         if not all_signals:
             return self._build_summary(symbol, [], current_prices)

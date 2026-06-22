@@ -72,9 +72,10 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
     per_day = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}.get(bar, 288)
     total_needed = days * per_day
 
-    end_ts = None
+    end_ts: Optional[datetime] = None
     if before:
-        before_clean = before.replace("Z", "+00:00") if isinstance(before, str) else before
+        # Replace trailing Z with +00:00 for fromisoformat compatibility
+        before_clean = before.replace("Z", "+00:00")
         end_ts = datetime.fromisoformat(before_clean)
 
     all_candles: List[Dict] = []
@@ -104,7 +105,7 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
                         "volume": float(k[5]),
                     })
                 all_candles.extend(batch)
-                page_end = batch[0]["timestamp"]  # oldest in this batch
+                page_end = batch[0]["timestamp"]  # type: ignore[assignment]
                 await asyncio.sleep(0.1)
         except Exception as e:
             logger.warning(f"[Binance] History fetch failed for {symbol} {bar}: {e}")
@@ -258,7 +259,7 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts):
 async def backtest_symbol(symbol: str, chunk_size: int = 500,
                           before: Optional[str] = None,
                           debug: bool = False,
-                          spot: bool = False) -> Dict:
+                          spot_only: bool = False) -> Dict:
     """Run 30-day backtest using DemoAccount.
 
     Args:
@@ -266,7 +267,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         chunk_size: Candles per processing chunk
         before: ISO date to end the 30-day window (default: now)
         debug: Enable per-trade debug logging and analysis
-        spot: If True, only trade LONG (skip SHORT signals — matches live spot executor)
+        spot_only: If True, only trade LONG (skip SHORT signals — matches live spot executor)
     """
     days = 30  # fixed 30-day window per month
 
@@ -306,7 +307,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         sl_multiplier=0.5,
         reentry_cooldown_minutes=0,
         symbol_min_scores={symbol.upper(): symbol_min_score},
-        spot_only=spot,
+        spot_only=spot_only,
     )
 
     signals_gen = 0
@@ -398,15 +399,14 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 signals_gen += 1
 
                 # HTF alignment filter
-                if htf_bias != "neutral":
-                    if sig.get("htf_aligned", True):
-                        aligned = [sig]
-                        signals_kept += 1
-                else:
-                    aligned = []
+                # When bias is neutral, signals pass through (no conflicting bias).
+                # The signal engine already sets htf_aligned=True when bias is neutral.
+                if htf_bias == "neutral" or sig.get("htf_aligned", True):
+                    aligned = [sig]
+                    signals_kept += 1
 
             # Step 3: Spot mode filter — skip SHORT signals (not executable on spot)
-            if spot and aligned and aligned[0].get("signal_type", "").startswith("SELL"):
+            if spot_only and aligned and aligned[0].get("signal_type", "").startswith("SELL"):
                 aligned = []
 
             # Step 4: Feed signals to DemoAccount
@@ -671,7 +671,7 @@ async def main():
                         help="Run a single symbol only (BTCUSDT or ETHUSDT). Default: both.")
     parser.add_argument("--debug", action="store_true",
                         help="Enable detailed per-trade debug analysis")
-    parser.add_argument("--spot", action="store_true",
+    parser.add_argument("--spot-only", action="store_true",
                         help="Spot-only mode: only trade LONG signals (skip SHORT). Matches live spot executor.")
     args = parser.parse_args()
 
@@ -704,7 +704,7 @@ async def main():
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
     print(f"  Both symbols: 0.5x SL, 0min cooldown, min_score=60")
     print(f"  Symbols: {', '.join(symbols)}")
-    if args.spot:
+    if args.spot_only:
         print(f"  SPOT MODE: LONG only (SHORT signals filtered — matches live spot executor)")
     if args.debug:
         print(f"  DEBUG MODE: enabled (per-trade analysis)")
@@ -724,12 +724,12 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, spot=args.spot) for sym in symbols]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
             for sym in symbols:
-                r = await backtest_symbol(sym, before=before_str, debug=args.debug, spot=args.spot)
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only)
                 results.append(r)
                 print()
 

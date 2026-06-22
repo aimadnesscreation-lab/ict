@@ -72,7 +72,7 @@ def get_session_high_low(df: pl.DataFrame, session_name: str) -> Tuple[Optional[
         return (None, None)
 
     start, end = SESSION_WINDOWS.get(session_name, (None, None))
-    if start is None:
+    if start is None or end is None:
         return (None, None)
 
     # Filter candles within the session window using vectorized hour check

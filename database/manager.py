@@ -9,7 +9,7 @@ from loguru import logger
 
 Base = declarative_base()
 
-class DBTrade(Base):
+class DBTrade(Base):  # type: ignore[valid-type,misc]
     __tablename__ = 'trades'
     id = Column(Integer, primary_key=True)
     symbol = Column(String)
@@ -28,7 +28,7 @@ class DBTrade(Base):
     result = Column(String)
     exit_reason = Column(String)
 
-class DBSignal(Base):
+class DBSignal(Base):  # type: ignore[valid-type,misc]
     __tablename__ = 'signals'
     id = Column(Integer, primary_key=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
@@ -39,7 +39,7 @@ class DBSignal(Base):
     timeframe = Column(String)
     details = Column(Text) # JSON string
 
-class DBAccountState(Base):
+class DBAccountState(Base):  # type: ignore[valid-type,misc]
     __tablename__ = 'account_state'
     id = Column(Integer, primary_key=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
@@ -47,7 +47,7 @@ class DBAccountState(Base):
     equity = Column(Float)
     peak_balance = Column(Float)
 
-class DBPosition(Base):
+class DBPosition(Base):  # type: ignore[valid-type,misc]
     __tablename__ = 'positions'
     symbol = Column(String, primary_key=True)
     side = Column(String)
