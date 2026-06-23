@@ -173,10 +173,9 @@ if curl -s http://localhost:8000/api/health > /dev/null 2>&1; then
     
     # Show a quick health summary
     HEALTH=$(curl -s http://localhost:8000/api/health)
-    BTC=$(echo "$HEALTH" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(f'\${d[\"btc_price\"]:,.0f}')" 2>/dev/null || echo "?")
     ETH=$(echo "$HEALTH" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(f'\${d[\"eth_price\"]:,.0f}')" 2>/dev/null || echo "?")
     BIAS=$(echo "$HEALTH" | $PYTHON -c "import sys,json; d=json.load(sys.stdin); print(d['htf_bias'])" 2>/dev/null || echo "?")
-    info "BTC: $BTC  |  ETH: $ETH  |  HTF Bias: ${BIAS}"
+    info "ETH: $ETH  |  HTF Bias: ${BIAS}"
 else
     warn "API server may not be ready yet. Check http://localhost:8000/api/health"
 fi

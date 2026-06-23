@@ -6,11 +6,12 @@ intermediary server), drives DemoAccount candle-by-candle matching live
 system logic exactly.
 
 Runs months sequentially (oldest first → most recent) to avoid timeouts.
-Each month: 2 symbols (BTC, ETH), ~8640 candles each, full ICT pipeline.
+Each month: ~8640 candles, full ICT pipeline.
 
 Usage:
-    python backtest_okx.py              # last 12 months
-    python backtest_okx.py --months 6   # last 6 months
+    python backtest_binance.py              # last 12 months (ETHUSDT)
+    python backtest_binance.py --months 6   # last 6 months
+    python backtest_binance.py --symbol ETHUSDT --no-kill-zone  # single symbol, all sessions
 """
 
 import asyncio
@@ -37,7 +38,7 @@ import json
 # ── Data source mapping ────────────────────────────────────────────
 BINANCE_BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1H": "1h", "4H": "4h", "1D": "1d"}
 
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+SYMBOLS = ["ETHUSDT"]
 # Default capital; override with --capital <amount> (e.g. --capital 10000)
 BACKTEST_CAPITAL = 5_000.0
 MAX_OPEN_POSITIONS = 3
@@ -59,7 +60,7 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
     no API key needed. Paginates, deduplicates, returns sorted Polars DataFrame.
 
     Args:
-        symbol: BTCUSDT or ETHUSDT
+        symbol: ETHUSDT (or any Binance Futures symbol)
         bar: 5m, 1H, etc.
         days: Number of days of data to fetch (1-90)
         before: ISO date string to end the window (e.g. "2025-06-15").
@@ -280,7 +281,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     """Run 30-day backtest using DemoAccount.
 
     Args:
-        symbol: BTCUSDT or ETHUSDT
+        symbol: ETHUSDT (or any Binance Futures symbol)
         chunk_size: Candles per processing chunk
         before: ISO date to end the 30-day window (default: now)
         debug: Enable per-trade debug logging and analysis
@@ -513,24 +514,20 @@ def print_month_result(month_num: int, month_label: str, data_range: str,
 
 
 def print_combined_summary(all_results: List[Dict], num_months: int):
-    """Print aggregated multi-month summary."""
+    """Print aggregated multi-month summary, grouped by symbol."""
     print(f"\n\n{'='*70}")
     print(f"  {num_months}-MONTH COMBINED SUMMARY")
     print(f"{'='*70}")
 
-    all_btc = [r for r in all_results if r["symbol"] == "BTCUSDT"]
-    all_eth = [r for r in all_results if r["symbol"] == "ETHUSDT"]
-
-    grand_total = {"btc": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
-                           "dd_sum": 0.0, "dd_count": 0, "rr_sum": 0.0, "rr_count": 0,
-                           "signals_gen": 0, "signals_kept": 0},
-                   "eth": {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
-                           "dd_sum": 0.0, "dd_count": 0, "rr_sum": 0.0, "rr_count": 0,
-                           "signals_gen": 0, "signals_kept": 0}}
-
+    # Group results by symbol (dynamic — works with any symbols)
+    by_symbol: Dict[str, Dict] = {}
     for r in all_results:
-        sym = "btc" if r["symbol"] == "BTCUSDT" else "eth"
-        g = grand_total[sym]
+        sym = r["symbol"]
+        if sym not in by_symbol:
+            by_symbol[sym] = {"trades": 0, "wins": 0, "losses": 0, "profit": 0.0,
+                              "dd_sum": 0.0, "dd_count": 0, "rr_sum": 0.0, "rr_count": 0,
+                              "signals_gen": 0, "signals_kept": 0}
+        g = by_symbol[sym]
         trades = r.get("total_trades", 0)
         g["trades"] += trades
         g["wins"] += r.get("wins", 0)
@@ -544,14 +541,14 @@ def print_combined_summary(all_results: List[Dict], num_months: int):
             g["rr_sum"] += r.get("avg_rr", 0.0) * trades
             g["rr_count"] += trades
 
-    for label, g in [("BTCUSDT", grand_total["btc"]), ("ETHUSDT", grand_total["eth"])]:
+    for sym, g in by_symbol.items():
         if g["trades"] == 0:
-            print(f"\n  {label}: No trades across all months")
+            print(f"\n  {sym}: No trades across all months")
             continue
         wr = g["wins"] / g["trades"] * 100 if g["trades"] > 0 else 0
         avg_dd = g["dd_sum"] / g["dd_count"] * 100 if g["dd_count"] > 0 else 0
         avg_rr = g["rr_sum"] / g["rr_count"] if g["rr_count"] > 0 else 0
-        print(f"\n  {label}")
+        print(f"\n  {sym}")
         print(f"    Total trades: {g['trades']}  (W:{g['wins']} L:{g['losses']})")
         print(f"    Win rate:     {wr:.1f}%")
         print(f"    Total P&L:    ${g['profit']:.2f}")
@@ -559,12 +556,14 @@ def print_combined_summary(all_results: List[Dict], num_months: int):
         print(f"    Avg RR:       {avg_rr:.2f}")
         print(f"    Signals:      {g['signals_gen']} gen → {g['signals_kept']} kept")
 
-    combined_trades = grand_total["btc"]["trades"] + grand_total["eth"]["trades"]
-    combined_profit = grand_total["btc"]["profit"] + grand_total["eth"]["profit"]
-    combined_wins = grand_total["btc"]["wins"] + grand_total["eth"]["wins"]
+    # Overall combined metrics across all symbols
+    combined_trades = sum(g["trades"] for g in by_symbol.values())
+    combined_profit = sum(g["profit"] for g in by_symbol.values())
+    combined_wins = sum(g["wins"] for g in by_symbol.values())
+    combined_symbols = " + ".join(by_symbol.keys())
 
     print(f"\n  {'─'*55}")
-    print(f"  COMBINED (Both Symbols)")
+    print(f"  COMBINED ({combined_symbols})")
     print(f"  {'─'*55}")
     print(f"  Total trades: {combined_trades}")
     if combined_trades > 0:
@@ -691,15 +690,15 @@ async def main():
     parser.add_argument("--capital", type=float, default=None,
                         help="Starting capital (default: 5000)")
     parser.add_argument("--symbol", type=str, default=None,
-                        help="Run a single symbol only (BTCUSDT or ETHUSDT). Default: both.")
+                        help="Symbol to backtest (default: ETHUSDT). Example: --symbol ETHUSDT")
     parser.add_argument("--debug", action="store_true",
                         help="Enable detailed per-trade debug analysis")
     parser.add_argument("--spot-only", action="store_true",
                         help="Spot-only mode: only trade LONG signals (skip SHORT). Matches live spot executor.")
     parser.add_argument("--fee-pct", type=float, default=0.0,
                         help="Round-trip trading fee as %% of notional (default 0.0, e.g. 0.04 for 0.04%%)")
-    parser.add_argument("--sl-multiplier", type=float, default=0.5,
-                        help="ATR multiplier for stop-loss distance (default 0.5, e.g. 2.0 for 2x ATR)")
+    parser.add_argument("--sl-multiplier", type=float, default=2.0,
+                        help="ATR multiplier for stop-loss distance (default 2.0, matches live api/main.py config)")
     parser.add_argument("--no-kill-zone", action="store_true",
                         help="Allow trading outside kill zones (default: False)")
     args = parser.parse_args()

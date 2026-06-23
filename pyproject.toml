@@ -43,7 +43,7 @@ files = [
     "discord/",
     "api/main.py",
     "demo_account.py",
-    "backtest_okx.py",
+    "backtest_binance.py",
     "test_integration.py",
     "tests/test_ict_engine.py",
 ]
@@ -58,5 +58,5 @@ allow_untyped_defs = true
 [[tool.mypy.overrides]]
 # Backtest runner uses many dynamic patterns for CLI argument handling
 # and optional print-level debug flags.
-module = "backtest_okx"
+module = "backtest_binance"
 ignore_missing_imports = true

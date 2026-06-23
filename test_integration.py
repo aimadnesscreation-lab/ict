@@ -108,7 +108,6 @@ async def monitor_data_flow(duration: int = 180):
             health_snapshots.append(health)
             print(f"    Status: {health.get('status')} | "
                   f"Bias: {health.get('htf_bias','?').upper()} | "
-                  f"BTC: ${health.get('btc_price',0):,.0f} | "
                   f"ETH: ${health.get('eth_price',0):,.0f}")
             print(f"    Signals: {health.get('total_signals_generated',0)} gen → "
                   f"{health.get('total_signals_kept',0)} kept | "
@@ -189,9 +188,8 @@ async def check_binance_demo():
             ok("No open positions on exchange (expected — no kill zone active)")
 
         # Verify has_position works
-        has_btc = await executor.has_position("BTCUSDT")
         has_eth = await executor.has_position("ETHUSDT")
-        ok(f"Position check: BTC={has_btc}, ETH={has_eth} (both should be False)")
+        ok(f"Position check: ETH={has_eth} (should be False)")
 
     except Exception as e:
         fail(f"Binance check failed: {e}")
@@ -254,7 +252,6 @@ async def main():
             kept = last.get("total_signals_kept", 0)
             cycles = last.get("cycle_count", 0)
             bias = last.get("htf_bias", "neutral")
-            btc = last.get("btc_price", 0)
             eth = last.get("eth_price", 0)
 
             if gen > 0:
@@ -267,8 +264,8 @@ async def main():
             else:
                 skip("HTF bias still neutral (may need more 1h data)")
 
-            if btc > 0 and eth > 0:
-                ok(f"Binance data flowing: BTC=${btc:,.0f}, ETH=${eth:,.0f}")
+            if eth > 0:
+                ok(f"Binance data flowing: ETH=${eth:,.0f}")
             else:
                 skip("Binance prices not yet populated")
 

@@ -1,63 +1,77 @@
 # ICT Trading Intelligence Platform
 
-A production-grade algorithmic trading platform built on **ICT (Inner Circle Trader)** concepts — a mathematical framework for market structure analysis. The system processes **real-time WebSocket data** through a 7-module ICT pipeline, scores confluences with a dual-scoring signal engine, manages a persistent forward-testing account, mirrors trades onto Binance Spot (LONG only), and surfaces everything through a React dashboard with real-time diagnostics and Discord webhook alerts.
+A production-grade algorithmic trading platform built on **ICT (Inner Circle Trader)** concepts — a mathematical framework for market structure analysis. The system processes **real-time WebSocket data** through a 7-module ICT pipeline, scores confluences with a dual-scoring signal engine, manages a persistent forward-testing account (DemoAccount), mirrors trades onto **Binance USDⓈ-M Futures** (LONG + SHORT), and surfaces everything through a React dashboard with real-time diagnostics and Discord webhook alerts.
 
 ---
 
 ## 🚀 Production-Ready Features
 
 - **Real-Time Data Ingestion:** Powered by **CCXT Pro WebSockets**. Zero-latency ticker and candle updates ensure entries are triggered the millisecond a candle closes.
-- **Persistent State Management:** Integrated **SQLite + SQLAlchemy** database. Every trade, signal, and balance change is persisted locally in `trading.db`.
+- **Binance USDⓈ-M Futures:** Supports both **LONG and SHORT** positions with 3× leverage, stop-market SL/TP orders, and one-way position mode.
+- **Dual-Scoring Signal Engine:** Tracks bullish and bearish confluences independently (not a single ambiguous score) — net difference determines signal direction.
+- **Persistent State Management:** Integrated **SQLite + SQLAlchemy** (async) database. Every trade, signal, and balance change is persisted locally in `trading.db`.
 - **Auto-Recovery:** The system automatically restores its state (balance, open positions, history) from the database on startup, surviving server restarts.
-- **WebSocket HTF Bias:** Real-time 1H trend detection via EMA crossovers. Shifts in higher-timeframe bias are detected instantly.
+- **WebSocket HTF Bias:** Real-time 1H trend detection via EMA12/EMA26 crossovers with 0.5% threshold. Falls back to swing structure analysis for neutral EMA readings.
+- **Position Reconciliation:** SyncWorker reconciles DemoAccount ↔ exchange positions every 30 seconds — detects SL/TP hits, partial fills, and manual closes on the exchange.
 - **Docker Support:** Ready for cloud deployment with `Dockerfile` and `docker-compose.yml`.
+- **Render Blueprint:** Deploy API + Dashboard on Render with one click via `render.yaml`.
+- **ETH-only Optimized:** Focused on ETHUSDT with `kill_zones_enabled=False` (trade all sessions) and `symbol_min_scores={"ETHUSDT": 60}`.
 - **System Diagnostics:** Dedicated `/api/diagnostics` endpoint for monitoring WebSocket health, DB connectivity, and risk levels.
 
 ---
 
 ## 📊 Backtest Results
 
-### Spot-Only (LONG Only — Matches Binance Spot) — 12 Months
+### Live Config — ETHUSDT — 12 Months (Jul 2025 – Jun 2026)
 
-| Metric | BTCUSDT | ETHUSDT | **Combined** |
-|--------|---------|---------|-------------|
-| **Total Trades** | 733 | 998 | **1,731** |
-| **Win Rate** | 42.6% | 40.2% | **41.2%** |
-| **Total P&L** | +$11,220.56 | +$11,115.87 | **+$22,336.43** |
-| **Total Return** | — | — | **+446.7%** |
-| **Avg Monthly P&L** | $935.05 | $926.32 | **$1,861.37** |
-| **Avg R:R** | ~1.40 | ~1.40 | **~1.40** |
-| **Avg Max DD** | ~7.5% | ~8.5% | **~8.0%** |
+**Configuration:** Binance Futures, LONG + SHORT, 2.0× ATR SL, 1:2 RR, 1% risk, 0.04% round-trip fee, no kill zone requirement, min score=60.
 
-*Run: `python backtest_okx.py --months 12 --spot-only --capital 5000`*
+| Metric | Value |
+|--------|:-----:|
+| **Total Trades** | **1,517** (588 W / 929 L) |
+| **Win Rate** | **38.8%** |
+| **Total P&L** | **+$5,077.67** |
+| **Total Return** | **+101.6%** |
+| **Avg Monthly P&L** | **+$423.14** |
+| **Avg R:R** | **1.39** |
+| **Avg Max Drawdown** | **14.3%** |
+| **Profit Factor** | **1.08** |
 
-### Futures-Enabled (LONG + SHORT — Binance Futures) — 12 Months
+*Run: `python backtest_binance.py --symbol ETHUSDT --months 12 --no-kill-zone --fee-pct 0.04 --sl-multiplier 2.0 --capital 5000`*
 
-*Results pending — the HTF alignment fix affects futures results too. Re-run with `python backtest_okx.py --months 12 --capital 5000` to update.*
+#### Per-Month Breakdown
 
-#### Per-Month Breakdown (Spot-Only)
+| Month | Trades | WR | P&L | PF | DD |
+|-------|:-----:|:--:|:---:|:--:|:--:|
+| Jul 2025 | 200 | 36.0% | -$172 | 0.97 | 19.6% |
+| Aug 2025 | 109 | 41.3% | **+$883** | 1.22 | 11.4% |
+| Sep 2025 | 102 | 36.3% | -$203 | 0.94 | 15.2% |
+| Oct 2025 | 147 | 39.5% | **+$689** | 1.13 | 11.4% |
+| Nov 2025 | 114 | 33.3% | -$505 | 0.86 | 19.6% |
+| Dec 2025 | 124 | 43.5% | **+$1,395** | 1.28 | 10.9% |
+| Jan 2026 | 97 | 40.2% | **+$326** | 1.10 | 13.1% |
+| Feb 2026 | 172 | 37.2% | **+$320** | 1.05 | 12.9% |
+| Mar 2026 | 152 | 40.1% | **+$938** | 1.16 | 11.3% |
+| Apr 2026 | 112 | 33.0% | -$623 | 0.83 | 17.8% |
+| May 2026 | 80 | 41.2% | **+$373** | 1.14 | 14.9% |
+| Jun 2026 | 108 | 46.3% | **+$1,658** | 1.47 | 13.2% |
 
-| Month | BTC Trades | BTC WR | BTC P&L | ETH Trades | ETH WR | ETH P&L | Combined P&L |
-|-------|:---------:|:------:|:-------:|:---------:|:------:|:-------:|:-----------:|
-| Jul 2025 | 66 | 39.4% | +$597.35 | 85 | 35.3% | +$210.88 | **+$808.23** |
-| Aug 2025 | 43 | 39.5% | +$391.23 | 217 | 38.7% | +$1,932.11 | **+$2,323.34** |
-| Sep 2025 | 51 | 47.1% | +$1,130.90 | 130 | 43.9% | +$2,422.48 | **+$3,553.38** |
-| Oct 2025 | 174 | 41.4% | +$2,464.01 | 121 | 38.8% | +$1,028.13 | **+$3,492.14** |
-| Nov 2025 | 72 | 40.3% | +$763.53 | 59 | 45.8% | +$1,187.30 | **+$1,950.83** |
-| Dec 2025 | 82 | 50.0% | +$2,457.96 | 74 | 46.0% | +$1,558.18 | **+$4,016.14** |
-| Jan 2026 | 44 | 52.3% | +$1,384.30 | 34 | 29.4% | -$211.31 | **+$1,172.99** |
-| Feb 2026 | 23 | 39.1% | +$191.16 | 33 | 51.5% | +$961.23 | **+$1,152.39** |
-| Mar 2026 | 83 | 41.0% | +$991.01 | 133 | 39.1% | +$1,203.40 | **+$2,194.41** |
-| Apr 2026 | 49 | 36.7% | +$229.55 | 62 | 35.5% | +$171.08 | **+$400.63** |
-| May 2026 | 27 | 55.6% | +$964.79 | 25 | 48.0% | +$564.54 | **+$1,529.33** |
-| Jun 2026 | 19 | 21.1% | -$345.23 | 25 | 36.0% | +$87.85 | **-$257.38** |
+#### Fee Impact Comparison (12 months)
+
+| Config | Trades | Annual P&L | Return | Max DD |
+|---|---:|---:|---:|---:|
+| **Live config** (2.0× SL + 0.04% fee) | 1,517 | **+$5,078** | **+102%** | 14.3% |
+| Tight SL + fees (0.5× SL + 0.04% fee) | 3,316 | -$22,106 | -442% | 44.4% |
+| Tight SL, no fees (0.5× SL, 0% fee) | 998 | +$11,116 | +222% | 8.5% |
+
+> **Key insight:** Fees have a massive impact on this high-frequency strategy. The wider 2.0× ATR stop-loss is essential — it cuts trade frequency by more than half (1,517 vs 3,316) and makes the strategy profitable with realistic Binance Futures fees. The 3% daily loss limit serves as a critical circuit breaker, preventing runaway losses in unfavorable market conditions.
 
 ---
 
 ## 🏗️ Architecture Overview
 
 ```
-Binance WebSockets (Real-time via CCXT Pro)
+Binance Futures WebSockets (Real-time via CCXT Pro)
                     │
                     ▼
   ┌─────────────────────────────┐     ┌──────────────────────────┐
@@ -72,24 +86,24 @@ Binance WebSockets (Real-time via CCXT Pro)
   │  Signal Engine               │◀─────────────────┘
   │  (dual-scoring 0-100)       │
   │  - HTF alignment filter     │
-  │  - Spot-only SHORT filter   │
+  │  - Futures: LONG + SHORT    │
   └──────────────┬──────────────┘
                  │
                  ▼
-  ┌─────────────────────────────┐     ┌──────────────────────────┐
-  │  DemoAccount + SQLite DB     │────▶│  LiveExecutor            │
-  │  - persistent state recovery │     │  (Binance Spot via CCXT) │
-  │  - trade entry/exit logging  │     │  - Market buy + OCO SL/TP│
-  │  - equity snapshotting       │     │  - 30s sync reconciliation│
-  └──────────────┬──────────────┘     └────────────┬─────────────┘
-                 │                                   │
-                 ▼                                   ▼
-  ┌─────────────────────────────┐     ┌──────────────────────────┐
-  │  FastAPI (REST + WebSocket)  │     │  Discord Bot             │
-  │  - /ws/prices (live ticks)  │     │  (webhook alerts)        │
-  │  - /ws/data (full snapshot) │     └──────────────────────────┘
-  │  - /api/diagnostics         │
-  └──────────────┬──────────────┘
+  ┌──────────────────────────────────┐     ┌──────────────────────────┐
+  │  DemoAccount + SQLite DB          │────▶│  LiveExecutor            │
+  │  - persistent state recovery      │     │  (Binance Futures)      │
+  │  - trade entry/exit/logging       │     │  - Market entry + SL/TP │
+  │  - 30s exchange sync reconciliation│     │  - STOP_MARKET / TAKE_PROFIT_MARKET │
+  └──────────────┬───────────────────┘     │  - LONG + SHORT support │
+                 │                           └────────────┬─────────────┘
+                 ▼                                        │
+  ┌─────────────────────────────┐              ┌──────────┘
+  │  FastAPI (REST + WebSocket)  │              │
+  │  - /ws/prices (live ticks)  │     ┌────────▼──────────┐
+  │  - /ws/data (full snapshot) │     │  Discord Bot       │
+  │  - /api/diagnostics         │     │  (webhook alerts)  │
+  └──────────────┬──────────────┘     └───────────────────┘
                  │
                  ▼
   ┌─────────────────────────────┐
@@ -97,6 +111,7 @@ Binance WebSockets (Real-time via CCXT Pro)
   │  - real-time via useDataStream (WS + REST fallback)  │
   │  - 6 pages: Overview, Signals, Charts, TradeLog,    │
   │    RiskCenter, Settings                              │
+  │  - lightweight-charts candlestick + EMA bias charts  │
   └─────────────────────────────┘
 ```
 
@@ -117,12 +132,12 @@ Binance WebSockets (Real-time via CCXT Pro)
 
 Unified entry point that coordinates the entire pipeline:
 
-1. Runs ICT pipeline on both 5m and 15m data
+1. Runs ICT pipeline on both **5m and 15m** data
 2. Generates signals via **dual-scoring** engine (bullish vs. bearish independently)
-3. **HTF alignment filter** — signals must align with **Real-time WebSocket 1h EMA bias**
-4. **Spot-only filter** — removes ALL SHORT signals (Binance Spot only supports LONG)
-5. Feeds qualifying signals to DemoAccount (requires: score ≥ min_score AND kill zone AND HTF aligned)
-6. Mirrors newly opened positions to Binance via LiveExecutor (market buy + OCO SL/TP)
+3. **HTF alignment filter** — signals must align with **Real-time WebSocket 1h EMA bias** (neutral bias lets all signals pass)
+4. **Futures mode** — both LONG and SHORT signals are supported
+5. Feeds qualifying signals to DemoAccount (requires: score ≥ min_score AND in kill zone AND HTF aligned)
+6. Mirrors newly opened positions to **Binance Futures** via LiveExecutor (LONG → buy, SHORT → sell)
 7. Sends Discord notifications per new position
 
 ### Layer 3: Demo Account + Database (`demo_account.py`, `database/`)
@@ -131,18 +146,39 @@ Unified entry point that coordinates the entire pipeline:
 - **$5,000** paper capital (configurable via `DEMO_INITIAL_BALANCE`)
 - **SQLite Persistence:** Uses `SQLAlchemy` + `aiosqlite` for asynchronous DB operations.
 - **State Recovery:** Restores balance and positions on startup from `trading.db`.
-- **1% risk** per trade (of current balance)
-- **0.5× ATR** stop loss, **1:2** risk-reward
-- Max **3 open positions** across all symbols
-- **3% daily loss limit** (circuit breaker)
+
+#### Trade Parameters
+
+| Parameter | Live Value | Backtest Default |
+|---|---:|---:|
+| Starting capital | $5,000 | $5,000 (`--capital`) |
+| Risk per trade | 1.0% of balance | 1.0% |
+| Stop-loss distance | **2.0× ATR** | **2.0× ATR** (`--sl-multiplier`) |
+| Take-profit distance | 1:2 RR (2× SL distance) | 1:2 RR |
+| Max open positions | 3 | 3 |
+| Max daily loss | 3.0% of initial balance | 3.0% |
+| Re-entry cooldown after SL | 0 min (none) | 0 min |
+| Min score to trade (ETHUSDT) | **60** | 60 (`--symbol-min-score`) |
+| Kill zone required | **No** (trade all sessions) | `--no-kill-zone` flag |
+| Direction | LONG + SHORT (Futures) | LONG + SHORT |
+| Leverage | 3× (live only, not used in DemoAccount) | N/A |
+| Fees | Maker 0.02% / Taker 0.04% | `--fee-pct 0.04` |
 
 ### Layer 4: Live Execution (`execution/`)
 
-- **LiveExecutor** (`executor.py`): Connects to Binance Spot via CCXT (demo/testnet/live)
-  - Places market buy orders with **OCO (One-Cancels-Other)** for SL + TP
-  - **Spot-only**: SHORT signals filtered upstream by orchestrator
+- **LiveExecutor** (`executor.py`): Connects to **Binance USDⓈ-M Futures** via CCXT (demo/testnet/live)
+  - Uses **market entry orders** + **STOP_MARKET** (stop-loss) + **TAKE_PROFIT_MARKET** (take-profit) as reduce-only orders
+  - Supports **both LONG and SHORT** positions
+  - **One-way position mode** (no hedge mode) — side='buy' opens LONG, side='sell' opens SHORT
+  - Default **3× leverage**
+  - Demo mode uses `enable_demo_trading(True)` for Binance Futures Testnet
+  - `has_position()` and `get_open_positions()` via `fetch_positions()`
+  - Handles precision rounding, min/max amount validation, and `set_leverage()`
 - **SyncWorker** (`sync_worker.py`): Reconciles DemoAccount ↔ exchange every 30s
   - Detects SL/TP hits on exchange → closes in DemoAccount
+  - Handles **partial fills** (exchange qty < DemoAccount qty → records partial trade)
+  - Logs **side mismatches** and quantity discrepancies
+  - Propagates `_last_sl` cooldown tracking
 
 ### Layer 5: API + Dashboard
 
@@ -243,15 +279,48 @@ This runs only the API (no dashboard dev server). Access the pre-built dashboard
 
 ## 🧪 Testing
 
+### Unit Tests (23 tests)
+
 ```bash
-# ICT engine unit tests
-pytest tests/test_ict_engine.py -v
+# Run all unit tests
+pytest tests/ -v
 
-# Binance connection test
-python test_live_connection.py
+# Individual test suites
+pytest tests/test_ict_engine.py -v           # 3 ICT module tests (swings, FVG, OB)
+pytest tests/test_orchestrator_mirror.py -v  # 7 orchestrator pipeline tests (mirror, KZ, HTF, risk)
+pytest tests/test_sync_worker.py -v          # 13 sync reconciliation tests (SL/TP, partial fills, multi-symbol)
+```
 
-# End-to-end integration test
+### End-to-End Integration Test
+
+```bash
 python test_integration.py
+```
+Starts the API server, monitors data flow for 3 minutes, and verifies:
+- Server boots and responds to health checks
+- Binance data backfill succeeds (candle buffers populated)
+- HTF bias is computed
+- ICT pipeline generates signals
+- DemoAccount processes signals
+- Binance demo trading connection is active
+
+### Binance Order Placement Test
+
+```bash
+python test_binance_orders.py
+```
+Tests the full order lifecycle on Binance Futures Testnet:
+- Exchange connection and market loading
+- Balance check and market precision
+- Leverage setting (3×)
+- LONG market entry with STOP_MARKET SL + TAKE_PROFIT_MARKET TP
+- Position verification on exchange
+- Position close and cleanup
+
+### All Tests (Quick Verification)
+
+```bash
+python -m pytest tests/ -v && python test_binance_orders.py
 ```
 
 ---

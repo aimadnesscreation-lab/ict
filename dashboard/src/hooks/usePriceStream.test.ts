@@ -167,12 +167,12 @@ describe('usePriceStream', () => {
     });
 
     const tick: PriceTick = {
-      symbol: 'BTCUSDT',
-      price: 68500.00,
-      change_24h: 2.15,
-      high_24h: 69000.00,
-      low_24h: 67000.00,
-      volume: 25000,
+      symbol: 'ETHUSDT',
+      price: 1805.00,
+      change_24h: 1.25,
+      high_24h: 1820.00,
+      low_24h: 1790.00,
+      volume: 15000,
       timestamp: '2026-06-13T20:00:00Z',
     };
 
@@ -180,28 +180,10 @@ describe('usePriceStream', () => {
       getWs()._receiveMessage(tick);
     });
 
-    expect(result.current.prices['BTCUSDT']).toEqual(tick);
+    expect(result.current.prices['ETHUSDT']).toEqual(tick);
   });
 
-  it('should accumulate prices for multiple symbols', () => {
-    const { result } = renderHook(() => usePriceStream());
 
-    act(() => getWs()._open());
-
-    act(() => getWs()._receiveMessage({
-      symbol: 'BTCUSDT', price: 68500, change_24h: 1.0,
-      high_24h: 69000, low_24h: 67000, volume: 10000, timestamp: '2026-01-01T00:00:00Z',
-    }));
-
-    act(() => getWs()._receiveMessage({
-      symbol: 'ETHUSDT', price: 3500, change_24h: -0.5,
-      high_24h: 3550, low_24h: 3450, volume: 5000, timestamp: '2026-01-01T00:00:01Z',
-    }));
-
-    expect(Object.keys(result.current.prices)).toHaveLength(2);
-    expect(result.current.prices['BTCUSDT'].price).toBe(68500);
-    expect(result.current.prices['ETHUSDT'].price).toBe(3500);
-  });
 
   it('should overwrite price for the same symbol with a later tick', () => {
     const { result } = renderHook(() => usePriceStream());
@@ -209,17 +191,17 @@ describe('usePriceStream', () => {
     act(() => getWs()._open());
 
     act(() => getWs()._receiveMessage({
-      symbol: 'BTCUSDT', price: 68500, change_24h: 1.0,
-      high_24h: 69000, low_24h: 67000, volume: 10000, timestamp: '2026-01-01T00:00:00Z',
+      symbol: 'ETHUSDT', price: 1805, change_24h: 1.0,
+      high_24h: 1820, low_24h: 1790, volume: 10000, timestamp: '2026-01-01T00:00:00Z',
     }));
 
     act(() => getWs()._receiveMessage({
-      symbol: 'BTCUSDT', price: 68600, change_24h: 1.2,
-      high_24h: 69100, low_24h: 67000, volume: 12000, timestamp: '2026-01-01T00:00:02Z',
+      symbol: 'ETHUSDT', price: 1810, change_24h: 1.2,
+      high_24h: 1825, low_24h: 1790, volume: 12000, timestamp: '2026-01-01T00:00:02Z',
     }));
 
     expect(Object.keys(result.current.prices)).toHaveLength(1);
-    expect(result.current.prices['BTCUSDT'].price).toBe(68600);
+    expect(result.current.prices['ETHUSDT'].price).toBe(1810);
   });
 
   it('should ignore malformed JSON messages', () => {
