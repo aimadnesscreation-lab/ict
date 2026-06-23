@@ -97,8 +97,8 @@ class LiveExecutor:
 
         # Enable Sandbox mode
         if self.mode == "demo":
-            self.exchange.set_sandbox_mode(True)
-            logger.info("Execution: Binance Futures Testnet mode enabled.")
+            self.exchange.enable_demo_trading(True)
+            logger.info("Execution: Binance Futures Testnet mode enabled via enable_demo_trading.")
         else:
             logger.info("Execution: Binance FUTURES LIVE mode (use with caution).")
 
@@ -314,14 +314,14 @@ class LiveExecutor:
             logger.warning(f"Execution: Invalid quantity {qty} for {symbol} after rounding")
             return None
 
-        # Determine CCXT side and positionSide from our side
+        # Determine CCXT side from our side
+        # One-way mode: side='buy' opens LONG / closes SHORT
+        #               side='sell' opens SHORT / closes LONG
         if side.upper() == "LONG":
             ccxt_side = 'buy'
-            position_side = 'LONG'
             opposite_side = 'sell'
         elif side.upper() == "SHORT":
             ccxt_side = 'sell'
-            position_side = 'SHORT'
             opposite_side = 'buy'
         else:
             logger.warning(f"Execution: Unknown side {side}")
@@ -337,14 +337,13 @@ class LiveExecutor:
             )
 
             # 2. Market Entry
+            # One-way mode: no positionSide param needed
             entry = await self.exchange.create_order(
                 symbol=market_symbol,
                 type='market',
                 side=ccxt_side,
                 amount=amount,
-                params={
-                    'positionSide': position_side,
-                }
+                params={}
             )
 
             filled = float(entry.get('filled', 0))
@@ -357,6 +356,7 @@ class LiveExecutor:
             )
 
             # 3. STOP_MARKET — stop-loss (reduce-only)
+            # One-way mode: side alone determines direction, no positionSide needed
             try:
                 await self.exchange.create_order(
                     symbol=market_symbol,
@@ -365,7 +365,6 @@ class LiveExecutor:
                     amount=filled,
                     params={
                         'stopPrice': sl,
-                        'positionSide': position_side,
                         'reduceOnly': True,
                         'workingType': 'MARK_PRICE',
                     }
@@ -375,6 +374,7 @@ class LiveExecutor:
                 logger.warning(f"  SL order failed: {e}")
 
             # 4. TAKE_PROFIT_MARKET — take-profit (reduce-only)
+            # One-way mode: side alone determines direction, no positionSide needed
             try:
                 await self.exchange.create_order(
                     symbol=market_symbol,
@@ -383,7 +383,6 @@ class LiveExecutor:
                     amount=filled,
                     params={
                         'stopPrice': tp,
-                        'positionSide': position_side,
                         'reduceOnly': True,
                         'workingType': 'MARK_PRICE',
                     }
