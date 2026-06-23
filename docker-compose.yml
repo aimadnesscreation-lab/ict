@@ -5,5 +5,8 @@ services:
       - "8000:8000"
     volumes:
       - ./trading.db:/app/trading.db
+      # Mount .env for Binance credentials + exchange mode
+      # Expected vars: BINANCE_API_KEY, BINANCE_SECRET, EXCHANGE_MODE (demo|live)
+      # Optional vars: DISCORD_WEBHOOK_URL, DEMO_INITIAL_BALANCE
       - .env:/app/.env
     restart: always

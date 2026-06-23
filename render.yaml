@@ -29,5 +29,11 @@ services:
 envVarGroups:
   - name: trading-settings
     envVars:
+      - key: BINANCE_API_KEY
+        sync: false  # paste your Binance API key in Render dashboard
+      - key: BINANCE_SECRET
+        sync: false  # paste your Binance API secret in Render dashboard
+      - key: EXCHANGE_MODE
+        value: demo  # switch to 'live' when ready for real trading
       - key: DISCORD_WEBHOOK_URL
-        sync: false  # you'll paste it in Render dashboard
+        sync: false  # paste your Discord webhook URL in Render dashboard
