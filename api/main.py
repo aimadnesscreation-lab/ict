@@ -391,117 +391,216 @@ async def _crypto_data_worker():
             # Convert to ms timestamp for comparison
             last_processed_ts[symbol] = int(buf[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
 
+    async def _on_candle_close(symbol: str, source_label: str):
+        """
+        Shared handler called when a new 5m candle close is detected
+        (from either WS or REST). Resamples, runs orchestrator, persists state.
+        """
+        nonlocal last_processed_ts
+        df_5m = pl.DataFrame(_candle_buffers[symbol]["5m"])
+        df_15m = _resample_5m_to_15m(df_5m)
+        _candle_buffers[symbol]["15m"] = [
+            {"timestamp": r["timestamp"], "open": r["open"],
+             "high": r["high"], "low": r["low"], "close": r["close"],
+             "volume": r["volume"]} for r in df_15m.to_dicts()
+        ]
+
+        htf_bias = _health.get("htf_bias", "neutral")
+        result = await _orchestrator.process_candle_close(
+            symbol=symbol,
+            df_5m=df_5m.slice(0, len(df_5m) - 1),
+            df_15m=df_15m,
+            current_prices=dict(_latest_prices),
+            htf_bias=htf_bias,
+        )
+
+        for sig in result.get("signals", []):
+            db_sig = sig.copy()
+            ts = db_sig.get("timestamp")
+            if isinstance(ts, datetime):
+                db_sig["timestamp"] = ts.replace(tzinfo=None)
+            asyncio.ensure_future(_db.save_signal(db_sig))
+
+        global _recent_signals, _recent_trades, _performance_cache
+        _recent_signals = result.get("signals", []) + _recent_signals
+        if len(_recent_signals) > 500:
+            _recent_signals = _recent_signals[:500]
+        _recent_trades = result.get("trades", [])
+        _performance_cache = result.get("performance", {})
+
+        perf = result.get("performance", {})
+        asyncio.ensure_future(_db.update_account_state(
+            balance=perf.get("capital_remaining", 0),
+            equity=perf.get("equity", perf.get("capital_remaining", 0)),
+            peak_balance=perf.get("peak_balance", 0)
+        ))
+
+        _health["total_signals_generated"] = _orchestrator.total_signals_generated
+        _health["total_signals_kept"] = _orchestrator.total_signals_kept
+        _health["total_trades_executed"] = _orchestrator.total_trades_executed
+        _health["last_cycle_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        _health["cycle_count"] = _orchestrator.cycle_count
+
+        asyncio.ensure_future(_broadcast_data())
+
     async def handle_tickers():
-        """Watch real-time price ticks for all symbols."""
+        """Watch real-time price ticks for all symbols.
+        Uses WS; falls back to REST polling every 5s if WS fails."""
+        ticker_ws_retries = 0
+        ticker_rest_fallback = False
         while True:
             try:
-                tickers = await exchange.watch_tickers(SYMBOLS)
-                # watch_tickers returns keys in unified format (e.g. "BTC/USDT")
-                # but our SYMBOLS use raw format (e.g. "BTCUSDT")
-                for unified_symbol, t in tickers.items():
-                    raw = unified_symbol.replace("/", "").upper()
-                    if raw in SYMBOLS:
-                        price = float(t["last"])
-                        _latest_prices[raw] = price
-                        _latest_ticks[raw] = {
-                            "symbol": raw,
-                            "price": price,
-                            "change_24h": round(float(t.get("percentage", 0) or 0), 2),
-                            "high_24h": float(t.get("high", price) or price),
-                            "low_24h": float(t.get("low", price) or price),
-                            "volume": round(float(t.get("baseVolume", 0) or 0), 2),
-                            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                        }
+                if not ticker_rest_fallback:
+                    try:
+                        tickers = await asyncio.wait_for(
+                            exchange.watch_tickers(SYMBOLS),
+                            timeout=30,
+                        )
+                        for unified_symbol, t in tickers.items():
+                            raw = unified_symbol.replace("/", "").upper()
+                            if raw in SYMBOLS:
+                                price = float(t["last"])
+                                _latest_prices[raw] = price
+                                _latest_ticks[raw] = {
+                                    "symbol": raw,
+                                    "price": price,
+                                    "change_24h": round(float(t.get("percentage", 0) or 0), 2),
+                                    "high_24h": float(t.get("high", price) or price),
+                                    "low_24h": float(t.get("low", price) or price),
+                                    "volume": round(float(t.get("baseVolume", 0) or 0), 2),
+                                    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                }
+                        ticker_ws_retries = 0
+                    except asyncio.TimeoutError:
+                        ticker_ws_retries += 1
+                        if ticker_ws_retries >= 2:
+                            ticker_rest_fallback = True
+                        else:
+                            await asyncio.sleep(2)
+                    except Exception as e:
+                        logger.debug(f"[WS] Ticker error: {e}")
+                        ticker_ws_retries += 1
+                        if ticker_ws_retries >= 3:
+                            ticker_rest_fallback = True
+                        else:
+                            await asyncio.sleep(2)
+                else:
+                    # REST fallback: poll 24hr ticker every 5 seconds
+                    for sym in SYMBOLS:
+                        try:
+                            async with httpx.AsyncClient(timeout=5.0) as client:
+                                resp = await client.get(
+                                    f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
+                                )
+                                if resp.status_code == 200:
+                                    t = resp.json()
+                                    price = float(t["lastPrice"])
+                                    _latest_prices[sym] = price
+                                    _latest_ticks[sym] = {
+                                        "symbol": sym,
+                                        "price": price,
+                                        "change_24h": round(float(t.get("priceChangePercent", 0) or 0), 2),
+                                        "high_24h": float(t.get("highPrice", price) or price),
+                                        "low_24h": float(t.get("lowPrice", price) or price),
+                                        "volume": round(float(t.get("volume", 0) or 0), 2),
+                                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                    }
+                        except Exception:
+                            pass
+                    # Try to reconnect WS every ~30s
+                    ticker_ws_retries += 1
+                    if ticker_ws_retries >= 6:
+                        logger.info("[WS] Attempting ticker WS reconnect...")
+                        ticker_rest_fallback = False
+                        ticker_ws_retries = 0
+                    await asyncio.sleep(5)
             except Exception as e:
-                logger.debug(f"[WS] Ticker error: {e}")
+                logger.debug(f"[WS] Ticker loop error: {e}")
                 await asyncio.sleep(2)
 
     async def handle_ohlcv(symbol: str):
-        """Watch real-time OHLCV candles and detect closes."""
+        """Watch real-time OHLCV candles and detect closes.
+        Uses WS; falls back to REST polling every 60s if WS fails."""
         global _recent_signals, _recent_trades, _performance_cache
+        ohlcv_ws_retries = 0
+        ohlcv_rest_fallback = False
+
+        async def _process_candle_close_rest():
+            """Fetch 5m candles via REST, detect close, run orchestrator."""
+            nonlocal last_processed_ts
+            candles = await _binance_fetch_candles(symbol, "5m", 288)
+            if not candles or len(candles) < 2:
+                return
+
+            # Update buffer
+            _candle_buffers.setdefault(symbol, {})["5m"] = candles
+
+            latest_ts = int(candles[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+            if symbol not in last_processed_ts:
+                last_processed_ts[symbol] = latest_ts
+                return
+
+            if latest_ts > last_processed_ts[symbol]:
+                logger.info(f"[REST] {symbol} 5m: Candle closed @ {datetime.fromtimestamp(last_processed_ts[symbol]/1000, tz=timezone.utc)}")
+                last_processed_ts[symbol] = latest_ts
+                await _on_candle_close(symbol, "REST")
+
         while True:
             try:
-                # watchOHLCV returns a list of [timestamp, open, high, low, close, volume]
-                # Timeout after 60s so we can log failures instead of hanging forever
-                ohlcvs = await asyncio.wait_for(
-                    exchange.watch_ohlcv(symbol, "5m"),
-                    timeout=120,
-                )
-                if not ohlcvs:
-                    continue
-                
-                # Update buffers
-                _candle_buffers.setdefault(symbol, {})["5m"] = [
-                    {
-                        "timestamp": datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc).replace(tzinfo=None), 
-                        "open": c[1], "high": c[2], "low": c[3], "close": c[4], 
-                        "volume": c[5]
-                    } for c in ohlcvs
-                ]
-                
-                # Check for candle close
-                # A candle is considered closed when we receive an update for a NEWER timestamp
-                latest_ts = ohlcvs[-1][0]
-                
-                if symbol not in last_processed_ts:
-                    last_processed_ts[symbol] = latest_ts
-                    continue
-                
-                if latest_ts > last_processed_ts[symbol]:
-                    logger.info(f"[WS] {symbol} 5m: Candle closed @ {datetime.fromtimestamp(last_processed_ts[symbol]/1000, tz=timezone.utc)}")
-                    last_processed_ts[symbol] = latest_ts
-                    
-                    # Resample to 15m
-                    df_5m = pl.DataFrame(_candle_buffers[symbol]["5m"])
-                    df_15m = _resample_5m_to_15m(df_5m)
-                    _candle_buffers[symbol]["15m"] = [
-                        {"timestamp": r["timestamp"], "open": r["open"],
-                         "high": r["high"], "low": r["low"], "close": r["close"],
-                         "volume": r["volume"]} for r in df_15m.to_dicts()
-                    ]
-                    
-                    # Run orchestrator on the CLOSED candle 
-                    # (we slice to avoid the current incomplete candle at the end of the buffer)
-                    htf_bias = _health.get("htf_bias", "neutral")
-                    result = await _orchestrator.process_candle_close(
-                        symbol=symbol,
-                        df_5m=df_5m.slice(0, len(df_5m) - 1), 
-                        df_15m=df_15m,
-                        current_prices=dict(_latest_prices),
-                        htf_bias=htf_bias,
-                    )
-                    
-                    # Persist signals to DB
-                    for sig in result.get("signals", []):
-                        db_sig = sig.copy()
-                        ts = db_sig.get("timestamp")
-                        if isinstance(ts, datetime):
-                            db_sig["timestamp"] = ts.replace(tzinfo=None)
-                        asyncio.ensure_future(_db.save_signal(db_sig))
+                if not ohlcv_rest_fallback:
+                    try:
+                        ohlcvs = await asyncio.wait_for(
+                            exchange.watch_ohlcv(symbol, "5m"),
+                            timeout=120,
+                        )
+                        if not ohlcvs:
+                            continue
 
-                    # Update global state
-                    _recent_signals = result.get("signals", []) + _recent_signals
-                    if len(_recent_signals) > 500:
-                        _recent_signals = _recent_signals[:500]
-                    _recent_trades = result.get("trades", [])
-                    _performance_cache = result.get("performance", {})
+                        _candle_buffers.setdefault(symbol, {})["5m"] = [
+                            {
+                                "timestamp": datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc).replace(tzinfo=None),
+                                "open": c[1], "high": c[2], "low": c[3], "close": c[4],
+                                "volume": c[5]
+                            } for c in ohlcvs
+                        ]
 
-                    # Persist account state
-                    perf = result.get("performance", {})
-                    asyncio.ensure_future(_db.update_account_state(
-                        balance=perf.get("capital_remaining", 0),
-                        equity=perf.get("equity", perf.get("capital_remaining", 0)),
-                        peak_balance=perf.get("peak_balance", 0)
-                    ))
+                        latest_ts = ohlcvs[-1][0]
+                        if symbol not in last_processed_ts:
+                            last_processed_ts[symbol] = latest_ts
+                            continue
 
-                    _health["total_signals_generated"] = _orchestrator.total_signals_generated
-                    _health["total_signals_kept"] = _orchestrator.total_signals_kept
-                    _health["total_trades_executed"] = _orchestrator.total_trades_executed
-                    _health["last_cycle_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                    _health["cycle_count"] = _orchestrator.cycle_count
+                        if latest_ts > last_processed_ts[symbol]:
+                            logger.info(f"[WS] {symbol} 5m: Candle closed @ {datetime.fromtimestamp(last_processed_ts[symbol]/1000, tz=timezone.utc)}")
+                            last_processed_ts[symbol] = latest_ts
+                            await _on_candle_close(symbol, "WS")
 
-                    asyncio.ensure_future(_broadcast_data())
-                
+                        ohlcv_ws_retries = 0
+                    except asyncio.TimeoutError:
+                        ohlcv_ws_retries += 1
+                        if ohlcv_ws_retries >= 2:
+                            ohlcv_rest_fallback = True
+                    except Exception as e:
+                        logger.warning(f"[WS] OHLCV error for {symbol}: {e}")
+                        ohlcv_ws_retries += 1
+                        if ohlcv_ws_retries >= 3:
+                            ohlcv_rest_fallback = True
+                        else:
+                            await asyncio.sleep(10)
+                else:
+                    # REST fallback: poll every 60s for new candle closes
+                    await _process_candle_close_rest()
+                    _health["last_error_message"] = None  # Clear the visible error
+
+                    # Try to reconnect WS every ~5 min
+                    ohlcv_ws_retries += 1
+                    if ohlcv_ws_retries >= 5:
+                        logger.info(f"[WS] Attempting OHLCV WS reconnect for {symbol}...")
+                        ohlcv_rest_fallback = False
+                        ohlcv_ws_retries = 0
+                        continue
+
+                    await asyncio.sleep(60)
+
             except Exception as e:
                 logger.warning(f"[WS] OHLCV error for {symbol}: {e}")
                 _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -527,46 +626,111 @@ async def _crypto_data_worker():
 
 async def _htf_bias_worker():
     """
-    Uses Binance WebSockets (via CCXT Pro) for real-time HTF bias (1H candles).
-    Updates HTF bias via EMA crossover the second it happens.
+    Computes HTF bias from 1h candles.
+    Primary: Binance WebSockets (via CCXT Pro) for real-time updates.
+    Fallback: Binance REST API polling if WebSocket fails (e.g. DNS issues on stream.binance.com).
     """
     import ccxt.pro as ccxtpro
-    exchange = ccxtpro.binance({
-        "enableRateLimit": True,
-        "options": {"defaultType": "spot"}
-    })
-    
+
+    rest_fallback = False
+    ws_retries = 0
+    max_ws_retries = 3
+    _last_processed_1h_ts: int = 0
+
+    async def _rest_check_bias():
+        """Fetch 1h candles via REST and update bias if changed."""
+        nonlocal _last_processed_1h_ts
+        candles = await _binance_fetch_candles("BTCUSDT", "1H", 100)
+        if not candles or len(candles) < 26:
+            return False
+
+        latest_ts = int(candles[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
+        if latest_ts <= _last_processed_1h_ts:
+            return False
+
+        _last_processed_1h_ts = latest_ts
+        df_htf = pl.DataFrame(candles)
+        new_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+
+        if new_bias == "neutral" and len(candles) >= 8:
+            df_swings = _ict_ms.detect_swings(df_htf)
+            new_bias = determine_bias_from_swings(df_swings)
+
+        if new_bias != _health.get("htf_bias"):
+            logger.info(f"[Bias] Shift: {new_bias.upper()} (REST)")
+            _health["htf_bias"] = new_bias
+            asyncio.ensure_future(_broadcast_data())
+        return True
+
+    # Seed initial bias immediately via REST (works even if WebSocket never connects)
+    try:
+        await _rest_check_bias()
+        logger.info(f"[Bias] Initial bias (REST): {_health.get('htf_bias', 'neutral').upper()}")
+    except Exception as e:
+        logger.warning(f"[Bias] Initial REST fetch failed: {e}")
+
     while True:
         try:
-            # watchOHLCV for 1H timeframe
-            ohlcvs = await exchange.watch_ohlcv("BTCUSDT", "1h")
-            if not ohlcvs or len(ohlcvs) < 26:
-                continue
-            
-            df_htf = pl.DataFrame([
-                {"timestamp": c[0], "open": c[1], "high": c[2], "low": c[3], "close": c[4], "volume": c[5]}
-                for c in ohlcvs
-            ])
-            
-            htf_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
-            
-            # Fallback to swing bias if EMA is neutral but we have enough data
-            if htf_bias == "neutral" and len(ohlcvs) >= 8:
-                df_swings = _ict_ms.detect_swings(df_htf)
-                htf_bias = determine_bias_from_swings(df_swings)
-            
-            if htf_bias != _health.get("htf_bias"):
-                logger.info(f"[Bias] HTF Shift Detected: {htf_bias.upper()}")
-                _health["htf_bias"] = htf_bias
-                asyncio.ensure_future(_broadcast_data())
-                
+            if not rest_fallback:
+                # ── WebSocket path ────────────────────────────────────────
+                exchange = ccxtpro.binance({
+                    "enableRateLimit": True,
+                    "options": {"defaultType": "spot"}
+                })
+                while not rest_fallback:
+                    try:
+                        ohlcvs = await exchange.watch_ohlcv("BTCUSDT", "1h")
+                        if not ohlcvs or len(ohlcvs) < 26:
+                            continue
+
+                        df_htf = pl.DataFrame([
+                            {"timestamp": c[0], "open": c[1], "high": c[2],
+                             "low": c[3], "close": c[4], "volume": c[5]}
+                            for c in ohlcvs
+                        ])
+                        new_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+                        if new_bias == "neutral" and len(ohlcvs) >= 8:
+                            df_swings = _ict_ms.detect_swings(df_htf)
+                            new_bias = determine_bias_from_swings(df_swings)
+
+                        if new_bias != _health.get("htf_bias"):
+                            logger.info(f"[Bias] Shift: {new_bias.upper()}")
+                            _health["htf_bias"] = new_bias
+                            asyncio.ensure_future(_broadcast_data())
+                        ws_retries = 0
+                    except asyncio.CancelledError:
+                        await exchange.close()
+                        raise
+                    except Exception as e:
+                        logger.warning(f"[Bias] WS error: {e}")
+                        ws_retries += 1
+                        if ws_retries >= max_ws_retries:
+                            logger.warning(f"[Bias] Falling back to REST (WS failed {ws_retries}x)")
+                            rest_fallback = True
+                            break
+                        await asyncio.sleep(5)
+
+                await exchange.close()
+            else:
+                # ── REST fallback path ────────────────────────────────────
+                # Update bias on new 1h candle close (poll every 60s)
+                await _rest_check_bias()
+
+                # Try to reconnect WebSocket every ~5 minutes
+                ws_retries += 1
+                if ws_retries >= 5:
+                    logger.info("[Bias] Attempting WebSocket reconnect...")
+                    rest_fallback = False
+                    ws_retries = 0
+                    continue
+
+                await asyncio.sleep(60)
+
         except asyncio.CancelledError:
             break
         except Exception as e:
-            logger.warning(f"[Bias] WS Update failed: {e}")
-            await asyncio.sleep(5)
-    
-    await exchange.close()
+            logger.error(f"[Bias] Worker error: {e}")
+            await asyncio.sleep(10)
 
 
 
