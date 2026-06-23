@@ -104,6 +104,18 @@ BUFFER_LIMITS = {"1m": 360, "5m": 288, "15m": 168}
 _candle_buffers: Dict[str, Dict[str, List[Dict]]] = {}
 _background_tasks: List[asyncio.Task] = []
 
+# ── Price state (seeded immediately so the dashboard always shows data) ──
+_latest_prices: Dict[str, float] = {"ETHUSDT": 1800.0}
+_NOW = datetime.now(timezone.utc)
+_latest_ticks: Dict[str, Dict] = {
+    "ETHUSDT": {
+        "symbol": "ETHUSDT", "price": 1800.0, "change_24h": 0.0,
+        "high_24h": 1800.0, "low_24h": 1800.0, "volume": 0.0,
+        "timestamp": _NOW.isoformat().replace("+00:00", "Z"),
+    }
+}
+DEFAULT_PRECISION = 2
+
 # ── WebSocket broadcast manager ────────────────────────────────────────
 _ws_clients: set[WebSocket] = set()
 
@@ -455,7 +467,9 @@ async def _crypto_data_worker():
                             timeout=30,
                         )
                         for unified_symbol, t in tickers.items():
-                            raw = unified_symbol.replace("/", "").upper()
+                            # CCXT unified format for binanceusdm: "ETH/USDT:USDT"
+                            # Strip the settlement suffix after ":", remove "/", uppercase
+                            raw = unified_symbol.split(":")[0].replace("/", "").upper()
                             if raw in SYMBOLS:
                                 price = float(t["last"])
                                 _latest_prices[raw] = price
@@ -605,12 +619,63 @@ async def _crypto_data_worker():
                 _health["last_error_message"] = f"OHLCV {symbol}: {e}"
                 await asyncio.sleep(10)
 
+    # Always-on REST ticker poller: fetches real Binance price every 30s
+    # regardless of WebSocket state. This is the safety net that ensures
+    # _latest_prices and _latest_ticks always reflect the current market price.
+    async def _rest_ticker_poller():
+        while True:
+            for sym in SYMBOLS:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        resp = await client.get(
+                            f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={sym}"
+                        )
+                        if resp.status_code == 200:
+                            t = resp.json()
+                            price = float(t["lastPrice"])
+                            _latest_prices[sym] = price
+                            _latest_ticks[sym] = {
+                                "symbol": sym,
+                                "price": price,
+                                "change_24h": round(float(t.get("priceChangePercent", 0) or 0), 2),
+                                "high_24h": float(t.get("highPrice", price) or price),
+                                "low_24h": float(t.get("lowPrice", price) or price),
+                                "volume": round(float(t.get("volume", 0) or 0), 2),
+                                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                            }
+                except Exception:
+                    pass
+            await asyncio.sleep(30)
+
     try:
-        # Run ticker watcher and OHLCV watchers in parallel
+        # Seed initial price immediately via REST before WebSocket connects
+        logger.info("[Ticker] Seeding initial price from Binance REST...")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get("https://fapi.binance.com/fapi/v1/ticker/24hr?symbol=ETHUSDT")
+                if resp.status_code == 200:
+                    t = resp.json()
+                    price = float(t["lastPrice"])
+                    _latest_prices["ETHUSDT"] = price
+                    _latest_ticks["ETHUSDT"] = {
+                        "symbol": "ETHUSDT",
+                        "price": price,
+                        "change_24h": round(float(t.get("priceChangePercent", 0) or 0), 2),
+                        "high_24h": float(t.get("highPrice", price) or price),
+                        "low_24h": float(t.get("lowPrice", price) or price),
+                        "volume": round(float(t.get("volume", 0) or 0), 2),
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    }
+                    logger.info(f"[Ticker] Initial price seeded: ${price:.2f}")
+        except Exception as e:
+            logger.warning(f"[Ticker] Initial REST seed failed: {e}")
+
+        # Run ticker watcher, REST ticker poller, and OHLCV watchers in parallel
         ticker_task = asyncio.create_task(handle_tickers())
+        rest_ticker_task = asyncio.create_task(_rest_ticker_poller())
         ohlcv_tasks = [asyncio.create_task(handle_ohlcv(s)) for s in SYMBOLS]
         
-        await asyncio.gather(ticker_task, *ohlcv_tasks)
+        await asyncio.gather(ticker_task, rest_ticker_task, *ohlcv_tasks)
     except asyncio.CancelledError:
         logger.info("[WS] Worker shutting down...")
     except Exception as e:
@@ -1144,27 +1209,31 @@ async def get_risk_status():
 
 # ── WebSocket Price Stream ───────────────────────────────────────────
 
-_latest_prices: Dict[str, float] = {"ETHUSDT": 1800.0}
-_latest_ticks: Dict[str, Dict] = {}
-DEFAULT_PRECISION = 2
+def _build_price_tick(symbol: str = "ETHUSDT") -> dict:
+    """Build a price tick dict, preferring _latest_ticks and falling back to _latest_prices."""
+    if symbol in _latest_ticks and _latest_ticks[symbol]:
+        return _latest_ticks[symbol]
+    price = _latest_prices.get(symbol, 1800.0)
+    return {
+        "symbol": symbol, "price": price, "change_24h": 0.0,
+        "high_24h": price, "low_24h": price, "volume": 0.0,
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
 
 
 @app.websocket("/ws/prices")
 async def ws_price_stream(websocket: WebSocket):
     await websocket.accept()
 
-    # Send most recent known prices immediately
+    # Send initial tick immediately — always has data thanks to seeded defaults
     for symbol in SYMBOLS:
-        if symbol in _latest_ticks and _latest_ticks[symbol]:
-            await websocket.send_json(_latest_ticks[symbol])
+        await websocket.send_json(_build_price_tick(symbol))
 
     try:
         while True:
             for symbol in SYMBOLS:
-                if symbol in _latest_ticks:
-                    await websocket.send_json(_latest_ticks[symbol])
+                await websocket.send_json(_build_price_tick(symbol))
                 await asyncio.sleep(0.25)
-            await asyncio.sleep(0.25)
     except WebSocketDisconnect:
         pass
     except Exception:
