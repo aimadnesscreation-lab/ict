@@ -9,14 +9,12 @@ export default function Overview() {
   const { prices } = usePriceStream();
   const { signals, demo, health, connected } = useDataStream();
 
-  const btc = prices['BTCUSDT'];
   const eth = prices['ETHUSDT'];
 
   return (
     <div className="space-y-6">
       {/* Live Price Bar */}
-      <div className="grid grid-cols-2 gap-4">
-        <LivePriceCard tick={btc} symbol="BTCUSDT" />
+      <div className="grid grid-cols-1 gap-4">
         <LivePriceCard tick={eth} symbol="ETHUSDT" />
       </div>
 

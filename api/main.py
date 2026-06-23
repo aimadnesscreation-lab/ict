@@ -132,7 +132,7 @@ def _build_ws_payload() -> dict:
     trades = []
     for i, t in enumerate(trades_raw[:200]):
         trades.append({
-            "id": i + 1, "symbol": t.get("symbol", "BTCUSDT"),
+            "id": i + 1, "symbol": t.get("symbol", "ETHUSDT"),
             "signal_type": t.get("signal_type", "NEUTRAL"),
             "entry_time": _serialize_for_ws(t.get("entry_time", "")),
             "exit_time": _serialize_for_ws(t.get("exit_time", "")),
@@ -166,7 +166,6 @@ def _build_ws_payload() -> dict:
     # Health
     health = _health.copy()
     health["htf_bias"] = _health.get("htf_bias", "neutral")
-    health["btc_price"] = _latest_prices.get("BTCUSDT", 0)
     health["eth_price"] = _latest_prices.get("ETHUSDT", 0)
 
     # Risk status
@@ -790,7 +789,7 @@ def format_signal(s: Dict) -> Dict:
     details = s.get("details", {})
     return {
         "id": s.get("id", 0),
-        "symbol": s.get("symbol", "BTCUSDT"),
+        "symbol": s.get("symbol", "ETHUSDT"),
         "signal_type": s.get("signal_type", "NEUTRAL"),
         "score": s.get("score", 0),
         "bullish_score": s.get("bullish_score", 0),
@@ -970,7 +969,7 @@ async def get_trades(
     result_trades = []
     for i, t in enumerate(trades[:limit]):
         result_trades.append({
-            "id": i + 1, "symbol": t.get("symbol", "BTCUSDT"),
+            "id": i + 1, "symbol": t.get("symbol", "ETHUSDT"),
             "signal_type": t.get("signal_type", "NEUTRAL"),
             "entry_time": (
                 t["entry_time"].isoformat()
@@ -1042,7 +1041,6 @@ async def get_diagnostics():
         },
         "bias": {
             "htf_bias": _health.get("htf_bias"),
-            "btc_price": _latest_prices.get("BTCUSDT"),
             "eth_price": _latest_prices.get("ETHUSDT"),
         },
         "database": {
@@ -1078,7 +1076,6 @@ async def get_health():
         "last_error_time": _health.get("last_error_time"),
         "last_error_message": _health.get("last_error_message"),
         "data_sources": _health.get("data_sources", []),
-        "btc_price": _latest_prices.get("BTCUSDT", 0),
         "eth_price": _latest_prices.get("ETHUSDT", 0),
     }
 
@@ -1147,7 +1144,7 @@ async def get_risk_status():
 
 # ── WebSocket Price Stream ───────────────────────────────────────────
 
-_latest_prices: Dict[str, float] = {"BTCUSDT": 67000.0, "ETHUSDT": 1800.0}
+_latest_prices: Dict[str, float] = {"ETHUSDT": 1800.0}
 _latest_ticks: Dict[str, Dict] = {}
 DEFAULT_PRECISION = 2
 

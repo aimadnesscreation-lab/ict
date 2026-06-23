@@ -22,7 +22,7 @@ export default function Layout({ children, activePage, onPageChange }: LayoutPro
   const { prices, connected } = usePriceStream();
 
   const tickerItems = useMemo(() => {
-    return ['BTCUSDT', 'ETHUSDT'].map(symbol => {
+    return ['ETHUSDT'].map(symbol => {
       const tick = prices[symbol];
       if (!tick) return null;
       const isUp = tick.change_24h >= 0;
