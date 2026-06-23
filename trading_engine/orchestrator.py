@@ -328,16 +328,9 @@ class TradingOrchestrator:
         current_prices: Dict[str, float],
     ) -> Dict:
         """Build a summary dict for the API to consume."""
-        open_positions = self.demo.get_open_positions_list()
-        for pos in open_positions:
-            sym = pos["symbol"]
-            cur_price = current_prices.get(sym, 0.0)
-            if cur_price > 0:
-                pos["current_price"] = round(cur_price, 2)
-                if pos["side"] == "LONG":
-                    pos["unrealized_pnl"] = round((cur_price - pos["entry_price"]) * pos["quantity"], 2)
-                else:
-                    pos["unrealized_pnl"] = round((pos["entry_price"] - cur_price) * pos["quantity"], 2)
+        open_positions = DemoAccount.enrich_positions(
+            self.demo.get_open_positions_list(), dict(current_prices),
+        )
 
         # Build performance dict with open positions — api/main.py stores
         # the "performance" key in _performance_cache. The /demo/account

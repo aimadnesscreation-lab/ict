@@ -34,8 +34,6 @@ _db = DatabaseManager()
 
 # ── App state ────────────────────────────────────────────────────────
 _recent_signals: List[Dict] = []
-_recent_trades: List[Dict] = []
-_performance_cache: Dict = {}
 
 # Risk Settings
 MAX_RISK_PER_TRADE_PCT = 1.0
@@ -139,10 +137,10 @@ def _build_ws_payload() -> dict:
     # Signals
     signals = [format_signal(s) for s in _recent_signals[:50]] if _recent_signals else []
 
-    # Trades – reuse the same formatting as /trades endpoint
-    trades_raw = _recent_trades if _recent_trades else []
+    # Trades — always read fresh from DemoAccount
+    trades_raw = _demo_account.get_closed_trades_list(200)
     trades = []
-    for i, t in enumerate(trades_raw[:200]):
+    for i, t in enumerate(trades_raw):
         trades.append({
             "id": i + 1, "symbol": t.get("symbol", "ETHUSDT"),
             "signal_type": t.get("signal_type", "NEUTRAL"),
@@ -156,23 +154,27 @@ def _build_ws_payload() -> dict:
             "exit_reason": t.get("exit_reason", ""),
         })
 
-    # Demo account
-    p = _performance_cache or {}
+    # Demo account — always read fresh from DemoAccount
+    perf = _demo_account.get_performance()
+    open_positions = DemoAccount.enrich_positions(
+        _demo_account.get_open_positions_list(), dict(_latest_prices),
+    )
+
     demo_account = {
-        "balance": p.get("capital_remaining", DEMO_INITIAL_BALANCE),
+        "balance": perf.get("capital_remaining", DEMO_INITIAL_BALANCE),
         "initial_balance": DEMO_INITIAL_BALANCE,
-        "total_profit": p.get("total_profit", 0.0),
-        "total_trades": p.get("total_trades", 0),
-        "win_rate": p.get("win_rate", 0.0),
-        "profit_factor": p.get("profit_factor", 0.0),
-        "max_drawdown": p.get("max_drawdown", 0.0),
-        "avg_rr": p.get("avg_rr", 0.0),
-        "total_wins": p.get("total_wins", 0),
-        "total_losses": p.get("total_losses", 0),
-        "peak_balance": p.get("peak_balance", DEMO_INITIAL_BALANCE),
-        "current_drawdown_pct": p.get("current_drawdown_pct", 0.0),
-        "open_positions_count": p.get("open_positions_count", 0),
-        "open_positions": _serialize_for_ws(p.get("open_positions", [])),
+        "total_profit": perf.get("total_profit", 0.0),
+        "total_trades": perf.get("total_trades", 0),
+        "win_rate": perf.get("win_rate", 0.0),
+        "profit_factor": perf.get("profit_factor", 0.0),
+        "max_drawdown": perf.get("max_drawdown", 0.0),
+        "avg_rr": perf.get("avg_rr", 0.0),
+        "total_wins": perf.get("total_wins", 0),
+        "total_losses": perf.get("total_losses", 0),
+        "peak_balance": perf.get("peak_balance", DEMO_INITIAL_BALANCE),
+        "current_drawdown_pct": perf.get("current_drawdown_pct", 0.0),
+        "open_positions_count": len(open_positions),
+        "open_positions": _serialize_for_ws(open_positions),
     }
 
     # Health
@@ -199,13 +201,13 @@ def _build_ws_payload() -> dict:
 
     # Performance metrics
     performance = {
-        "win_rate": p.get("win_rate", 0.0),
-        "total_pnl": p.get("total_profit", 0.0),
-        "profit_factor": p.get("profit_factor", 0.0),
-        "max_drawdown": p.get("max_drawdown", 0.0),
-        "sharpe_ratio": p.get("sharpe_ratio", 0.0),
-        "total_trades": p.get("total_trades", 0),
-        "avg_rr": p.get("avg_rr", 0.0),
+        "win_rate": perf.get("win_rate", 0.0),
+        "total_pnl": perf.get("total_profit", 0.0),
+        "profit_factor": perf.get("profit_factor", 0.0),
+        "max_drawdown": perf.get("max_drawdown", 0.0),
+        "sharpe_ratio": perf.get("sharpe_ratio", 0.0),
+        "total_trades": perf.get("total_trades", 0),
+        "avg_rr": perf.get("avg_rr", 0.0),
     }
 
     return {
@@ -256,10 +258,6 @@ async def lifespan(app: FastAPI):
                 positions=db_positions,
                 trades=db_trades
             )
-            # Pre-fill caches
-            global _recent_trades, _performance_cache
-            _recent_trades = _demo_account.get_closed_trades_list(200)
-            _performance_cache = _demo_account.get_performance()
     except Exception as e:
         logger.error(f"Failed to restore state from DB: {e}")
 
@@ -383,7 +381,7 @@ async def _crypto_data_worker():
     Uses Binance WebSockets (via CCXT Pro) for real-time ticker + candles.
     On new candle close: runs orchestrator.process_candle_close().
     """
-    global _latest_prices, _latest_ticks, _recent_signals, _recent_trades, _performance_cache
+    global _latest_prices, _latest_ticks, _recent_signals
 
     await _backfill_buffers()
     
@@ -431,12 +429,10 @@ async def _crypto_data_worker():
                 db_sig["timestamp"] = ts.replace(tzinfo=None)
             asyncio.ensure_future(_db.save_signal(db_sig))
 
-        global _recent_signals, _recent_trades, _performance_cache
+        global _recent_signals
         _recent_signals = result.get("signals", []) + _recent_signals
         if len(_recent_signals) > 500:
             _recent_signals = _recent_signals[:500]
-        _recent_trades = result.get("trades", [])
-        _performance_cache = result.get("performance", {})
 
         perf = result.get("performance", {})
         asyncio.ensure_future(_db.update_account_state(
@@ -533,7 +529,7 @@ async def _crypto_data_worker():
     async def handle_ohlcv(symbol: str):
         """Watch real-time OHLCV candles and detect closes.
         Uses WS; falls back to REST polling every 60s if WS fails."""
-        global _recent_signals, _recent_trades, _performance_cache
+        global _recent_signals
         ohlcv_ws_retries = 0
         ohlcv_rest_fallback = False
 
@@ -1025,7 +1021,8 @@ async def get_trades(
     result: Optional[str] = Query(None),
     symbol: Optional[str] = Query(None),
 ):
-    trades = _recent_trades if _recent_trades else []
+    # Always read fresh from DemoAccount — never stale
+    trades = _demo_account.get_closed_trades_list(limit=limit)
     if result:
         trades = [t for t in trades if t.get("result") == result]
     if symbol:
@@ -1056,16 +1053,17 @@ async def get_trades(
 
 @app.get("/performance")
 async def get_performance():
-    if not _performance_cache:
+    # Always read fresh from DemoAccount — never stale
+    p = _demo_account.get_performance()
+    if not p or p.get("total_trades", 0) == 0:
         return {"win_rate": 0.0, "total_pnl": 0.0, "profit_factor": 0.0,
                 "max_drawdown": 0.0, "sharpe_ratio": 0.0, "total_trades": 0, "avg_rr": 0.0}
-    p = _performance_cache
     return {
         "win_rate": p.get("win_rate", 0.0),
         "total_pnl": p.get("total_profit", 0.0),
         "profit_factor": p.get("profit_factor", 0.0),
         "max_drawdown": p.get("max_drawdown", 0.0),
-        "sharpe_ratio": _performance_cache.get("sharpe_ratio", 0.0),
+        "sharpe_ratio": p.get("sharpe_ratio", 0.0),
         "total_trades": p.get("total_trades", 0),
         "avg_rr": p.get("avg_rr", 0.0),
     }
@@ -1073,24 +1071,27 @@ async def get_performance():
 
 @app.get("/demo/account")
 async def get_demo_account():
+    # Always read fresh from DemoAccount — never stale
+    perf = _demo_account.get_performance()
+    open_positions = DemoAccount.enrich_positions(
+        _demo_account.get_open_positions_list(), dict(_latest_prices),
+    )
     initial_balance = _demo_account.initial_balance
-    balance = _performance_cache.get("capital_remaining", initial_balance) if _performance_cache else initial_balance
-    peak = _performance_cache.get("peak_balance", initial_balance) if _performance_cache else initial_balance
     return {
-        "balance": balance,
+        "balance": perf.get("capital_remaining", initial_balance),
         "initial_balance": initial_balance,
-        "total_profit": _performance_cache.get("total_profit", 0.0) if _performance_cache else 0.0,
-        "total_trades": _performance_cache.get("total_trades", 0) if _performance_cache else 0,
-        "win_rate": _performance_cache.get("win_rate", 0.0) if _performance_cache else 0.0,
-        "profit_factor": _performance_cache.get("profit_factor", 0.0) if _performance_cache else 0.0,
-        "max_drawdown": _performance_cache.get("max_drawdown", 0.0) if _performance_cache else 0.0,
-        "avg_rr": _performance_cache.get("avg_rr", 0.0) if _performance_cache else 0.0,
-        "total_wins": _performance_cache.get("total_wins", 0) if _performance_cache else 0,
-        "total_losses": _performance_cache.get("total_losses", 0) if _performance_cache else 0,
-        "peak_balance": peak,
-        "current_drawdown_pct": _performance_cache.get("current_drawdown_pct", 0.0) if _performance_cache else 0.0,
-        "open_positions_count": _performance_cache.get("open_positions_count", 0) if _performance_cache else 0,
-        "open_positions": _performance_cache.get("open_positions", []) if _performance_cache else [],
+        "total_profit": perf.get("total_profit", 0.0),
+        "total_trades": perf.get("total_trades", 0),
+        "win_rate": perf.get("win_rate", 0.0),
+        "profit_factor": perf.get("profit_factor", 0.0),
+        "max_drawdown": perf.get("max_drawdown", 0.0),
+        "avg_rr": perf.get("avg_rr", 0.0),
+        "total_wins": perf.get("total_wins", 0),
+        "total_losses": perf.get("total_losses", 0),
+        "peak_balance": perf.get("peak_balance", initial_balance),
+        "current_drawdown_pct": perf.get("current_drawdown_pct", 0.0),
+        "open_positions_count": len(open_positions),
+        "open_positions": open_positions,
     }
 
 
@@ -1110,7 +1111,7 @@ async def get_diagnostics():
         },
         "database": {
             "connected": True, # Managed by SQLAlchemy aiosqlite
-            "total_trades": len(_recent_trades),
+            "total_trades": len(_demo_account.closed_trades),
         },
         "risk": {
             "daily_loss_pct": round(_demo_account.daily_loss / _demo_account.initial_balance * 100, 2),
@@ -1149,10 +1150,8 @@ async def get_health():
 async def reset_all():
     await _orchestrator.reset_all(initial_balance=DEMO_INITIAL_BALANCE)
 
-    global _recent_signals, _recent_trades, _performance_cache
+    global _recent_signals
     _recent_signals = []
-    _recent_trades = []
-    _performance_cache = {}
 
     _health["total_signals_generated"] = 0
     _health["total_signals_kept"] = 0

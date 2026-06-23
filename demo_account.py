@@ -273,6 +273,24 @@ class DemoAccount:
             for pos in self.open_positions.values()
         ]
 
+    @staticmethod
+    def enrich_positions(open_positions: List[Dict], latest_prices: Dict[str, float]) -> List[Dict]:
+        """Fill current_price and unrealized_pnl for each open position dict.
+
+        Mutates the position dicts in-place and returns the list for chaining.
+        Each position dict must have: symbol, side, entry_price, quantity.
+        """
+        for pos in open_positions:
+            sym = pos["symbol"]
+            cur_price = latest_prices.get(sym, 0.0)
+            if cur_price > 0:
+                pos["current_price"] = round(cur_price, 2)
+                if pos["side"] == "LONG":
+                    pos["unrealized_pnl"] = round((cur_price - pos["entry_price"]) * pos["quantity"], 2)
+                else:
+                    pos["unrealized_pnl"] = round((pos["entry_price"] - cur_price) * pos["quantity"], 2)
+        return open_positions
+
     def get_closed_trades_list(self, limit: int = 200) -> List[Dict]:
         """Return closed trades in API-friendly format (newest first)."""
         trades = sorted(self.closed_trades, key=lambda t: t.exit_time, reverse=True)[:limit]
