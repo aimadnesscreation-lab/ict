@@ -60,7 +60,7 @@ export const tradingApi = {
       status: 'unknown', uptime: '', started_at: '', last_cycle_time: null,
       cycle_count: 0, htf_bias: 'neutral', total_signals_generated: 0,
       total_signals_kept: 0, total_trades_executed: 0, last_error_time: null,
-      last_error_message: null, data_sources: [], btc_price: 0, eth_price: 0,
+      last_error_message: null, data_sources: [], eth_price: 0,
     }),
 
   resetAll: (): Promise<{ status: string; message: string }> =>

@@ -35,18 +35,17 @@ const MAX_RECONNECT_ATTEMPTS = 10;
 // from real price data. Prices use round numbers with slow, step-wise
 // movement and fixed 24h change to avoid misleading users.
 
-const FALLBACK_SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
+const FALLBACK_SYMBOLS = ['ETHUSDT'];
 const FALLBACK_BASE: Record<string, number> = {
-  BTCUSDT: 67000, ETHUSDT: 1800,
+  ETHUSDT: 1800,
 };
 
 function generateMockTick(prices: Record<string, number>): PriceTick {
-  // Alternate between symbols so both update predictably
-  const symbol = FALLBACK_SYMBOLS[Math.floor(Math.random() * FALLBACK_SYMBOLS.length)];
+  // Generate mock ETH price with slow drift
+  const symbol = FALLBACK_SYMBOLS[0];
   const base = prices[symbol] ?? FALLBACK_BASE[symbol];
-  // Use a slow drift and truncate to nearest 10 (BTC) or 1 (ETH)
   const drift = base * (Math.random() - 0.5) * 0.0004;
-  const roundTo = symbol === 'BTCUSDT' ? 10 : 1;
+  const roundTo = 1;
   const newPrice = Math.round((base + drift) / roundTo) * roundTo;
   prices[symbol] = newPrice;
   return {

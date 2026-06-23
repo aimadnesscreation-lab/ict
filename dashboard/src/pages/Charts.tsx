@@ -7,11 +7,11 @@ import ICTChart from '../components/ICTChart';
 import EMABiasChart from '../components/EMABiasChart';
 import type { CandlestickData, Time } from 'lightweight-charts';
 
-const SYMBOLS = ['BTCUSDT', 'ETHUSDT'];
+const SYMBOLS = ['ETHUSDT'];
 const TIMEFRAMES = ['1h', '5m', '15m'];
 
 export default function Charts() {
-  const [symbol, setSymbol] = useState('BTCUSDT');
+  const [symbol, setSymbol] = useState('ETHUSDT');
   const [timeframe, setTimeframe] = useState('1h');
   const { prices } = usePriceStream();
 
@@ -37,8 +37,8 @@ export default function Charts() {
     }
     // Fallback mock
     const now = initialTime;
-    const base = symbol.startsWith('BTC') ? 68000 : 3500;
-    const range = symbol.startsWith('BTC') ? 500 : 50;
+    const base = 3500;
+    const range = 50;
     const step = timeframe === '5m' ? 300 : timeframe === '15m' ? 900 : 3600;
     return Array.from({ length: 100 }, (_, i) => ({
       time: (now - (100 - i) * step) as Time,

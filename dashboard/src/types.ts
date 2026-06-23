@@ -137,6 +137,5 @@ export interface HealthStatus {
   last_error_time: string | null;
   last_error_message: string | null;
   data_sources: string[];
-  btc_price: number;
   eth_price: number;
 }
