@@ -66,11 +66,10 @@ _demo_account = DemoAccount(
     initial_balance=DEMO_INITIAL_BALANCE, risk_per_trade_pct=MAX_RISK_PER_TRADE_PCT,
     max_daily_loss_pct=MAX_DAILY_LOSS_PCT,
     max_open_positions=MAX_OPEN_POSITIONS,
-    sl_multiplier=1.5,
+    sl_multiplier=2.0,
     reentry_cooldown_minutes=0,
-    symbol_sl_multipliers={"BTCUSDT": 0.5, "ETHUSDT": 0.5},
-    symbol_min_scores={"BTCUSDT": 60, "ETHUSDT": 60},
-    spot_only=True,  # Binance Spot — no SHORT trades
+    symbol_min_scores={"ETHUSDT": 60},
+    spot_only=False,  # Binance Futures — supports both LONG and SHORT
     db_manager=_db,
 )
 
@@ -91,13 +90,14 @@ _orchestrator = TradingOrchestrator(
     demo_account=_demo_account,
     live_executor=_live_executor,
     discord_bot=_discord_bot,
+    kill_zones_enabled=False,  # ETH-only optimal config: trade all sessions
 )
 
 # ── ICT detectors for HTF bias ───────────────────────────────────────
 _ict_ms = MarketStructure(n=3)
 
 # ── Binance data ─────────────────────────────────────────────────────
-SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+SYMBOLS = ["ETHUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m"]
 BUFFER_LIMITS = {"1m": 360, "5m": 288, "15m": 168}
 
@@ -307,7 +307,7 @@ async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Opt
     interval = BINANCE_BAR_MAP.get(bar)
     if not interval:
         return None
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://fapi.binance.com/fapi/v1/klines"
     params = {"symbol": symbol, "interval": interval, "limit": str(limit)}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -378,9 +378,8 @@ async def _crypto_data_worker():
     
     import ccxt.pro as ccxtpro
     # Initialize CCXT Pro exchange for real-time data
-    exchange = ccxtpro.binance({
+    exchange = ccxtpro.binanceusdm({
         "enableRateLimit": True,
-        "options": {"defaultType": "spot"}
     })
     
     # Track the last processed candle timestamp per symbol
@@ -490,7 +489,7 @@ async def _crypto_data_worker():
                         try:
                             async with httpx.AsyncClient(timeout=5.0) as client:
                                 resp = await client.get(
-                                    f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}"
+                                    f"https://fapi.binance.com/fapi/v1/ticker/24hr?symbol={sym}"
                                 )
                                 if resp.status_code == 200:
                                     t = resp.json()
@@ -640,7 +639,7 @@ async def _htf_bias_worker():
     async def _rest_check_bias():
         """Fetch 1h candles via REST and update bias if changed."""
         nonlocal _last_processed_1h_ts
-        candles = await _binance_fetch_candles("BTCUSDT", "1H", 100)
+        candles = await _binance_fetch_candles("ETHUSDT", "1H", 100)
         if not candles or len(candles) < 26:
             return False
 
@@ -673,13 +672,12 @@ async def _htf_bias_worker():
         try:
             if not rest_fallback:
                 # ── WebSocket path ────────────────────────────────────────
-                exchange = ccxtpro.binance({
+                exchange = ccxtpro.binanceusdm({
                     "enableRateLimit": True,
-                    "options": {"defaultType": "spot"}
                 })
                 while not rest_fallback:
                     try:
-                        ohlcvs = await exchange.watch_ohlcv("BTCUSDT", "1h")
+                        ohlcvs = await exchange.watch_ohlcv("ETHUSDT", "1h")
                         if not ohlcvs or len(ohlcvs) < 26:
                             continue
 
@@ -901,7 +899,7 @@ async def get_backtest_data(
             page_end = datetime.fromisoformat(before_clean)
 
         while len(all_candles) < total_needed:
-            url = "https://api.binance.com/api/v3/klines"
+            url = "https://fapi.binance.com/fapi/v1/klines"
             params = {"symbol": symbol, "interval": interval, "limit": "1000"}
             if page_end:
                 params["endTime"] = str(int(page_end.timestamp() * 1000))

@@ -1,9 +1,12 @@
 """
-Binance Spot Trading Engine.
+Binance Futures Trading Engine.
 
-Connects to Binance Spot (Demo Trading Portal or Testnet) via CCXT.
-Handles symbol conversion (BTCUSDT → BTC/USDT), amount precision,
-OCO order placement, and balance-based position tracking.
+Connects to Binance USDⓈ-M Futures via CCXT.
+Handles symbol conversion (BTCUSDT → BTC/USDT:USDT), amount precision,
+leverage setting, market entry orders, and STOP_MARKET / TAKE_PROFIT_MARKET
+for stop-loss and take-profit.
+
+Futures supports BOTH LONG and SHORT positions.
 
 Usage:
     executor = LiveExecutor(mode="demo")
@@ -25,46 +28,48 @@ load_dotenv()
 
 TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
+DEFAULT_LEVERAGE = 3  # Default leverage for futures positions
+
 
 def normalize_symbol(symbol: str) -> str:
-    """Convert raw symbol (e.g. BTCUSDT) to CCXT spot unified format.
+    """Convert raw symbol (e.g. BTCUSDT) to CCXT futures unified format.
 
-    Spot format: BTCUSDT → BTC/USDT (no :USDT suffix, unlike futures).
+    Futures format: BTCUSDT → BTC/USDT:USDT (linear perpetual contract).
     Handles any symbol length — strips the trailing 'USDT' suffix.
     """
     if symbol.endswith("USDT"):
         base = symbol[:-4]  # Remove 'USDT' suffix
     else:
         base = symbol  # fallback
-    return f"{base}/USDT"
+    return f"{base}/USDT:USDT"
 
 
 def denormalize_symbol(market_symbol: str) -> str:
-    """Convert CCXT unified symbol back to raw format (e.g. BTC/USDT or BTC/USDT:USDT → BTCUSDT)."""
+    """Convert CCXT unified symbol back to raw format.
+
+    Handles both spot (BTC/USDT) and futures (BTC/USDT:USDT) formats.
+    """
     base = market_symbol.split("/")[0]
     return f"{base}USDT"
 
 
 class LiveExecutor:
     """
-    Live Execution Engine — Binance Spot Trading.
+    Live Execution Engine — Binance USDⓈ-M Futures Trading.
 
-    Connects to Binance Spot (Demo Trading Portal or Testnet) via CCXT.
-    Uses market orders for entry with OCO (One-Cancels-Other) stop-loss
-    and take-profit orders.
+    Connects to Binance Futures (Testnet or Live) via CCXT.
+    Uses market orders for entry with STOP_MARKET stop-loss and
+    TAKE_PROFIT_MARKET take-profit orders.
 
-    SPOT ONLY: Only supports LONG positions. SHORT signals are filtered
-    upstream by the TradingOrchestrator.
-
-    For Binance Spot:
-      - quantity is in base currency (e.g. BTC for BTC/USDT)
-      - No leverage (spot trades 1:1)
-      - amount precision: BTC=0.00001, ETH=0.001
+    FUTURES: Supports both LONG and SHORT positions.
+    - quantity is in base currency (e.g. BTC for BTC/USDT)
+    - Leverage scales buying power (default 3×)
+    - Positions managed via fetch_positions()
+    - SL/TP placed as reduce-only stop/take-profit market orders
     """
 
     def __init__(self, mode: str = "demo"):
         self.mode = mode.lower()
-        self.exchange_name = "binance"
         self._markets_loaded = False
 
         # Load Binance credentials
@@ -77,29 +82,25 @@ class LiveExecutor:
             self.exchange = None
             return
 
-        # Initialize CCXT Binance instance — spot mode
+        # Initialize CCXT Binance Futures instance — USDⓈ-M
         config = {
             'apiKey': self.api_key,
             'secret': self.secret,
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'spot',
+                'defaultType': 'future',
+                'hedgeMode': False,  # One-way mode (simpler position management)
             }
         }
 
-        self.exchange = ccxt.binance(config)
+        self.exchange = ccxt.binanceusdm(config)
 
-        # Enable Demo/Sandbox mode
+        # Enable Sandbox mode
         if self.mode == "demo":
-            self.exchange.options['warnOnFetchOpenOrdersWithoutSymbol'] = False
-            if hasattr(self.exchange, 'enable_demo_trading'):
-                self.exchange.enable_demo_trading(True)
-                logger.info("Execution: Binance Demo Trading Portal enabled (Spot).")
-            else:
-                self.exchange.set_sandbox_mode(True)
-                logger.info("Execution: Binance Testnet mode enabled (Spot, fallback).")
+            self.exchange.set_sandbox_mode(True)
+            logger.info("Execution: Binance Futures Testnet mode enabled.")
         else:
-            logger.info("Execution: Binance SPOT LIVE mode (use with caution).")
+            logger.info("Execution: Binance FUTURES LIVE mode (use with caution).")
 
     # ── Market Info ───────────────────────────────────────────────────
 
@@ -115,7 +116,7 @@ class LiveExecutor:
 
     def _get_market_precision(self, symbol: str) -> Tuple[float, float, float]:
         """Get amount precision, min amount, and max amount for a symbol.
-        
+
         Returns (amount_precision, min_amount, max_amount).
         Falls back to sensible defaults if markets not loaded.
         """
@@ -137,7 +138,8 @@ class LiveExecutor:
 
     def _round_amount(self, symbol: str, amount: float) -> Optional[float]:
         """Round amount to the symbol's precision and validate it's within limits.
-        Returns None if the amount is below the minimum."""
+        Returns None if the amount is below the minimum.
+        """
         prec, min_amt, max_amt = self._get_market_precision(symbol)
         # Round down to precision (floor to avoid exceeding position limits)
         rounded = int(amount / prec) * prec if prec > 0 else amount
@@ -152,20 +154,23 @@ class LiveExecutor:
     # ── Balance ───────────────────────────────────────────────────────
 
     async def get_balance(self, asset: str = "USDT") -> float:
-        """Fetch the available (free) balance for a specific asset on the exchange."""
+        """Fetch the wallet balance for a specific asset on the futures account.
+
+        Uses the 'free' (available to open new positions) balance.
+        """
         if not self.exchange:
             return 0.0
         try:
             balance = await self.exchange.fetch_balance()
             free = float(balance.get(asset, {}).get('free', 0.0))
-            logger.debug(f"Execution: {asset} balance = {free}")
+            logger.debug(f"Execution: Futures {asset} balance = {free}")
             return free
         except Exception as e:
             logger.error(f"Execution: Failed to fetch balance: {e}")
             return 0.0
 
     async def get_total_balance(self, asset: str = "USDT") -> float:
-        """Fetch the total (free + used) balance for a specific asset."""
+        """Fetch the total (free + used) balance for a specific asset on futures."""
         if not self.exchange:
             return 0.0
         try:
@@ -179,72 +184,86 @@ class LiveExecutor:
     # ── Positions ────────────────────────────────────────────────────
 
     async def get_open_positions(self) -> List[Dict]:
-        """Return all open positions from the exchange.
+        """Return all open positions from the futures exchange.
 
-        SPOT: Checks balance of base assets for tracked symbols.
-        A "position" is simply a non-zero free balance of the base asset.
+        FUTURES: Uses fetch_positions() which returns real position data
+        including entry price, unrealized PnL, and size per side.
         """
         if not self.exchange:
             return []
         try:
-            balance = await self.exchange.fetch_balance()
-            positions = []
-            for raw_symbol in TRACKED_SYMBOLS:
-                base = raw_symbol.replace('USDT', '')
-                free = float(balance.get(base, {}).get('free', 0))
-                total = float(balance.get(base, {}).get('total', 0))
-                if total > 0:
-                    positions.append({
-                        'symbol': normalize_symbol(raw_symbol),
-                        'contracts': total,
-                        'size': total,
-                        'side': 'long',
-                        'entryPrice': 0.0,  # Spot doesn't track entry price via balance
-                        'unrealizedPnl': 0.0,
+            positions = await self.exchange.fetch_positions()
+            open_positions = []
+            for p in positions:
+                contracts = float(p.get('contracts', 0) or 0)
+                if contracts > 0:
+                    side = 'long' if p.get('side') == 'long' else 'short'
+                    open_positions.append({
+                        'symbol': p.get('symbol', ''),
+                        'contracts': contracts,
+                        'size': contracts,
+                        'side': side,
+                        'entryPrice': float(p.get('entryPrice', 0) or 0),
+                        'unrealizedPnl': float(p.get('unrealizedPnl', 0) or 0),
+                        'leverage': float(p.get('leverage', 1) or 1),
+                        'liquidationPrice': float(p.get('liquidationPrice', 0) or 0),
+                        'margin': float(p.get('initialMargin', 0) or 0),
+                        'percentage': float(p.get('percentage', 0) or 0),
                     })
-            return positions
+            return open_positions
         except Exception as e:
-            logger.error(f"Execution: Failed to fetch spot positions: {e}")
+            logger.error(f"Execution: Failed to fetch futures positions: {e}")
             return []
 
     async def has_position(self, symbol: str) -> bool:
-        """Check if the exchange has an open position for a given symbol.
-
-        SPOT: Checks if the free balance of the base asset exceeds a
-        minimum threshold (to ignore dust from testing or fees).
-
-        Minimum thresholds:
-          - BTC: ≥ 0.001 (≈ $65 at $65k BTC)
-          - ETH: ≥ 0.01  (≈ $18 at $1.8k ETH)
-          - Others: ≥ 1 unit
+        """Check if there is an open futures position for a given symbol.
 
         Args:
             symbol: Raw symbol like 'BTCUSDT'
         Returns:
-            True if we hold a meaningful balance of the base asset
+            True if we hold a meaningful position on the futures market
         """
         if not self.exchange:
             return False
         try:
-            balance = await self.exchange.fetch_balance()
-            base = symbol.replace('USDT', '')
-            free = float(balance.get(base, {}).get('free', 0))
-            # Minimum thresholds to ignore dust
-            thresholds = {"BTC": 0.001, "ETH": 0.01}
-            min_balance = thresholds.get(base, 1.0)
-            return free >= min_balance
+            positions = await self.exchange.fetch_positions()
+            market_symbol = normalize_symbol(symbol)
+            for p in positions:
+                if p.get('symbol') == market_symbol:
+                    contracts = float(p.get('contracts', 0) or 0)
+                    if contracts > 0:
+                        return True
+            return False
         except Exception as e:
             logger.error(f"Execution: has_position failed for {symbol}: {e}")
             return False
 
     async def get_position_for_symbol(self, symbol: str) -> Optional[Dict]:
-        """Get the open position for a specific symbol, or None if not found."""
+        """Get the open futures position for a specific symbol, or None if not found."""
         positions = await self.get_open_positions()
         market_symbol = normalize_symbol(symbol)
         for p in positions:
             if p.get('symbol') == market_symbol:
                 return p
         return None
+
+    # ── Leverage ─────────────────────────────────────────────────────
+
+    async def set_leverage(self, symbol: str, leverage: int = DEFAULT_LEVERAGE):
+        """Set leverage for a futures symbol.
+
+        Args:
+            symbol: Raw symbol like 'BTCUSDT'
+            leverage: Leverage value (1-125 for most symbols)
+        """
+        if not self.exchange:
+            return
+        try:
+            market_symbol = normalize_symbol(symbol)
+            await self.exchange.set_leverage(leverage, market_symbol)
+            logger.info(f"Execution: Leverage set to {leverage}x for {symbol}")
+        except Exception as e:
+            logger.debug(f"Execution: Leverage set skipped for {market_symbol}: {e}")
 
     # ── Order Placement ──────────────────────────────────────────────
 
@@ -258,22 +277,21 @@ class LiveExecutor:
         tp: float,
     ) -> Optional[Dict]:
         """
-        Place Spot Market order with OCO Stop Loss + Take Profit.
+        Place Futures Market order with STOP_MARKET + TAKE_PROFIT_MARKET.
 
-        SPOT LIMITATION: Only LONG positions are supported. SHORT signals
-        are skipped with a warning (would require margin).
+        FUTURES: Supports both LONG and SHORT positions.
 
-        On Binance spot, SL and TP cannot be placed as separate sell orders
-        because each one locks the base asset. Instead we use an OCO
-        (One-Cancels-Other) order which combines both into a single order
-        sharing the same quantity lock:
-          1. Market buy the base asset
-          2. Place an OCO sell: LIMIT at TP level + STOP_LOSS_LIMIT at SL level
+        Order flow:
+          1. Set leverage for the symbol
+          2. Place a market entry order (buy for LONG, sell for SHORT)
+             with positionSide=LONG or positionSide=SHORT
+          3. Place a STOP_MARKET order (reduce-only) for stop-loss
+          4. Place a TAKE_PROFIT_MARKET order (reduce-only) for take-profit
 
         Args:
             symbol: Raw symbol like 'BTCUSDT'
-            side: 'LONG' or 'SHORT' (SHORT is skipped on spot)
-            qty: Desired quantity in base currency (actual fill may differ due to fees)
+            side: 'LONG' or 'SHORT'
+            qty: Desired quantity in base currency
             price: Current market price (for reference/logging)
             sl: Stop-loss price
             tp: Take-profit price
@@ -284,112 +302,99 @@ class LiveExecutor:
         if not self.exchange:
             return None
 
-        # Spot can only go LONG
-        if side.upper() != "LONG":
-            logger.info(f"Execution: Skipping {side} {symbol} — spot trading only supports LONG")
-            return None
-
         # Ensure markets are loaded for precision/limits
         await self._ensure_markets()
 
-        # Convert to CCXT unified spot symbol
+        # Convert to CCXT unified futures symbol
         market_symbol = normalize_symbol(symbol)
 
-        # ═══ SPOT SIZING: Cap quantity to available USDT balance ═══
-        # DemoAccount calculates qty using futures-style risk sizing:
-        #   qty = risk_amount / sl_distance
-        # This gives a qty with full notional = qty × price, which can exceed
-        # the USDT balance. On spot (1:1, no leverage), we must cap to what
-        # the balance can actually afford.
-        usdt_balance = await self.get_balance()
-        max_qty_by_balance = usdt_balance / price if price > 0 else qty
-        capped_qty = min(qty, max_qty_by_balance)
-        if capped_qty < qty:
-            logger.info(
-                f"Execution: Spot sizing cap — qty {qty} exceeds USDT balance "
-                f"(${usdt_balance:.2f} ÷ ${price:.2f} = {max_qty_by_balance:.6f}), "
-                f"using {capped_qty:.6f}"
-            )
         # Validate and round quantity
-        amount = self._round_amount(symbol, capped_qty)
+        amount = self._round_amount(symbol, qty)
         if amount is None or amount <= 0:
-            logger.warning(f"Execution: Invalid quantity {capped_qty} for {symbol} after rounding")
+            logger.warning(f"Execution: Invalid quantity {qty} for {symbol} after rounding")
+            return None
+
+        # Determine CCXT side and positionSide from our side
+        if side.upper() == "LONG":
+            ccxt_side = 'buy'
+            position_side = 'LONG'
+            opposite_side = 'sell'
+        elif side.upper() == "SHORT":
+            ccxt_side = 'sell'
+            position_side = 'SHORT'
+            opposite_side = 'buy'
+        else:
+            logger.warning(f"Execution: Unknown side {side}")
             return None
 
         try:
+            # 1. Set leverage
+            await self.set_leverage(symbol, DEFAULT_LEVERAGE)
+
             logger.info(
-                f"Execution: Opening LONG {market_symbol} qty={amount} "
+                f"Execution: Opening {side} {market_symbol} qty={amount} "
                 f"SL={sl} TP={tp}"
             )
 
-            # 1. Market Entry — buy the base asset
+            # 2. Market Entry
             entry = await self.exchange.create_order(
                 symbol=market_symbol,
                 type='market',
-                side='buy',
+                side=ccxt_side,
                 amount=amount,
+                params={
+                    'positionSide': position_side,
+                }
             )
 
-            # Determine the actual filled quantity.
-            # On Binance spot, the entry order's 'filled' is the gross filled
-            # amount. After the taker fee (~0.1%) is deducted, the actual
-            # receivable balance is slightly less. We fetch the post-fill
-            # balance to get the exact amount available for the OCO sell.
             filled = float(entry.get('filled', 0))
             if filled <= 0:
                 filled = amount
 
-            # Fetch actual balance after the market buy to account for fees
+            avg_entry = float(entry.get('price', 0) or price)
+            logger.info(
+                f"  Entry filled: {filled} @ {avg_entry} (requested {amount})"
+            )
+
+            # 3. STOP_MARKET — stop-loss (reduce-only)
             try:
-                post_balance = await self.exchange.fetch_balance()
-                base_cur = symbol.replace('USDT', '')
-                actual_free = float(post_balance.get(base_cur, {}).get('free', 0))
-                if actual_free > 0:
-                    actual_qty_raw = actual_free
-                else:
-                    # Fallback: estimate net after 0.1% taker fee
-                    actual_qty_raw = filled * 0.999
-            except Exception:
-                actual_qty_raw = filled * 0.999  # Fallback: estimate after fee
+                await self.exchange.create_order(
+                    symbol=market_symbol,
+                    type='STOP_MARKET',
+                    side=opposite_side,
+                    amount=filled,
+                    params={
+                        'stopPrice': sl,
+                        'positionSide': position_side,
+                        'reduceOnly': True,
+                        'workingType': 'MARK_PRICE',
+                    }
+                )
+                logger.info(f"  SL order placed: STOP_MARKET {opposite_side} @ {sl}")
+            except Exception as e:
+                logger.warning(f"  SL order failed: {e}")
 
-            actual_qty = self._round_amount(symbol, actual_qty_raw)
-            if actual_qty is None or actual_qty <= 0:
-                logger.warning(f"Execution: Post-fill balance {actual_qty_raw} too small for {symbol} OCO")
-                return entry
-
-            logger.info(f"  Filled {filled} {market_symbol}, post-fee balance={actual_qty:.6f} (requested {amount})")
-
-            # 2. OCO — combines Stop Loss + Take Profit in one order
-            # On Binance spot, CCXT's type='oco' is rejected by market validation.
-            # Instead we call privatePostOrderOco directly — POST /api/v3/order/oco
-            # This places:
-            #   - LIMIT sell at TP (fills when price rises to take-profit level)
-            #   - STOP_LOSS_LIMIT sell triggered when price drops to SL
-            # Both legs share the same quantity lock (no double-lock issue).
-            oco_params = {
-                'symbol': symbol.upper(),          # ETHUSDT (Binance raw format)
-                'side': 'SELL',
-                'quantity': actual_qty,
-                'price': tp,                       # LIMIT price = take profit
-                'stopPrice': sl,                   # Stop trigger = stop loss
-                'stopLimitPrice': sl,              # Stop limit price = same as trigger
-                'stopLimitTimeInForce': 'GTC',
-            }
-
-            # Format numbers to exchange precision
+            # 4. TAKE_PROFIT_MARKET — take-profit (reduce-only)
             try:
-                oco_params['quantity'] = self.exchange.amount_to_precision(market_symbol, actual_qty)
-                oco_params['price'] = self.exchange.price_to_precision(market_symbol, tp)
-                oco_params['stopPrice'] = self.exchange.price_to_precision(market_symbol, sl)
-                oco_params['stopLimitPrice'] = self.exchange.price_to_precision(market_symbol, sl)
-            except Exception:
-                pass  # Use raw floats if precision formatting fails
-
-            oco_result = await self.exchange.privatePostOrderOco(oco_params)
+                await self.exchange.create_order(
+                    symbol=market_symbol,
+                    type='TAKE_PROFIT_MARKET',
+                    side=opposite_side,
+                    amount=filled,
+                    params={
+                        'stopPrice': tp,
+                        'positionSide': position_side,
+                        'reduceOnly': True,
+                        'workingType': 'MARK_PRICE',
+                    }
+                )
+                logger.info(f"  TP order placed: TAKE_PROFIT_MARKET {opposite_side} @ {tp}")
+            except Exception as e:
+                logger.warning(f"  TP order failed: {e}")
 
             logger.info(
-                f"Execution: LONG {market_symbol} entry=${price:.2f} "
-                f"SL=${sl:.2f} TP=${tp:.2f} qty={actual_qty} (OCO placed, orderListId={oco_result.get('orderListId', '?')})"
+                f"Execution: {side} {market_symbol} entry={avg_entry:.2f} "
+                f"SL={sl:.2f} TP={tp:.2f} qty={filled}"
             )
             return entry
 
@@ -401,7 +406,8 @@ class LiveExecutor:
 
     async def cancel_all_orders(self, symbol: Optional[str] = None):
         """Cancel all open orders on the exchange, optionally for a specific symbol.
-        Useful for cleanup and testing."""
+        Useful for cleanup and testing.
+        """
         if not self.exchange:
             return
         try:

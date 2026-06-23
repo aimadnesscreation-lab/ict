@@ -80,7 +80,7 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
 
     all_candles: List[Dict] = []
     page_end = end_ts
-    url = "https://api.binance.com/api/v3/klines"
+    url = "https://fapi.binance.com/fapi/v1/klines"
 
     while len(all_candles) < total_needed:
         params = {"symbol": symbol, "interval": interval, "limit": "1000"}
@@ -150,7 +150,8 @@ def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
 
 def extract_signal_at_candle(df_ict: pl.DataFrame, candle_idx: int,
                              htf_bias: str, current_price: float,
-                             min_score: int = 80) -> Optional[Dict]:
+                             min_score: int = 80,
+                             require_kill_zone: bool = True) -> Optional[Dict]:
     """
     Extract signal from pre-computed ICT columns at a given candle index.
 
@@ -198,7 +199,7 @@ def extract_signal_at_candle(df_ict: pl.DataFrame, candle_idx: int,
     signal_type = signal.get("signal_type", "NEUTRAL")
     in_kz = signal.get("in_kill_zone", False)
 
-    if score < min_score or not in_kz or signal_type == "NEUTRAL":
+    if score < min_score or (require_kill_zone and not in_kz) or signal_type == "NEUTRAL":
         return None
     if htf_bias != "neutral" and not signal.get("htf_aligned", True):
         return None
@@ -222,12 +223,25 @@ def check_position_vs_candle(pos, candle_high: float, candle_low: float, current
     return None, None
 
 
-def close_position(demo, pos, exit_price, exit_reason, current_ts):
-    """Close a position and update DemoAccount state."""
+def close_position(demo, pos, exit_price, exit_reason, current_ts, fee_pct: float = 0.0):
+    """Close a position and update DemoAccount state.
+
+    If fee_pct > 0, deducts round-trip trading fees from the gross profit.
+    fee_pct is the total round-trip fee as a percentage of average notional
+    (e.g. 0.04 = 0.04% round-trip).
+    """
     if pos.side == "LONG":
-        profit = (exit_price - pos.entry_price) * pos.quantity
+        gross_profit = (exit_price - pos.entry_price) * pos.quantity
     else:
-        profit = (pos.entry_price - exit_price) * pos.quantity
+        gross_profit = (pos.entry_price - exit_price) * pos.quantity
+
+    # Deduct trading fees
+    if fee_pct > 0:
+        avg_notional = ((pos.entry_price + exit_price) / 2) * pos.quantity
+        fee_amount = avg_notional * (fee_pct / 100)
+    else:
+        fee_amount = 0.0
+    profit = gross_profit - fee_amount
 
     rr = abs(exit_price - pos.entry_price) / abs(pos.entry_price - pos.stop_loss) \
         if abs(pos.entry_price - pos.stop_loss) > 0 else 0
@@ -259,7 +273,10 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts):
 async def backtest_symbol(symbol: str, chunk_size: int = 500,
                           before: Optional[str] = None,
                           debug: bool = False,
-                          spot_only: bool = False) -> Dict:
+                          spot_only: bool = False,
+                          fee_pct: float = 0.0,
+                          sl_multiplier: float = 0.5,
+                          no_kill_zone: bool = False) -> Dict:
     """Run 30-day backtest using DemoAccount.
 
     Args:
@@ -298,13 +315,14 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     rows = df_5m_full.to_dicts()
     total_candles = len(rows)
 
-    # Both symbols now use identical settings: 0.5× SL, no cooldown, min_score=60
+    # Both symbols use same config per run
     symbol_min_score = 60
+    require_kz = not no_kill_zone
 
     demo = DemoAccount(
         initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
-        sl_multiplier=0.5,
+        sl_multiplier=sl_multiplier,
         reentry_cooldown_minutes=0,
         symbol_min_scores={symbol.upper(): symbol_min_score},
         spot_only=spot_only,
@@ -385,14 +403,15 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                             "entry_ts": pos.entry_time.isoformat(),
                             "exit_ts": current_ts.isoformat(),
                         })
-                    close_position(demo, pos, price, reason, current_ts)
+                    close_position(demo, pos, price, reason, current_ts, fee_pct=fee_pct)
                     if debug and sym in current_trade_start:
                         del current_trade_start[sym]
 
             # Step 2: Extract signal from pre-computed ICT columns (fast: no pipeline re-run)
             aligned = []
             sig = extract_signal_at_candle(df_ict, candle_idx, htf_bias, current_price,
-                                             min_score=symbol_min_score)
+                                             min_score=symbol_min_score,
+                                             require_kill_zone=require_kz)
             if sig is not None:
                 sig["symbol"] = symbol
                 sig["timestamp"] = current_ts
@@ -408,6 +427,10 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
             # Step 3: Spot mode filter — skip SHORT signals (not executable on spot)
             if spot_only and aligned and aligned[0].get("signal_type", "").startswith("SELL"):
                 aligned = []
+
+            # When no_kill_zone is True, override signal's in_kill_zone so DemoAccount accepts it
+            if no_kill_zone and aligned:
+                aligned[0]["in_kill_zone"] = True
 
             # Step 4: Feed signals to DemoAccount
             prev_positions = set(demo.open_positions.keys())
@@ -673,6 +696,12 @@ async def main():
                         help="Enable detailed per-trade debug analysis")
     parser.add_argument("--spot-only", action="store_true",
                         help="Spot-only mode: only trade LONG signals (skip SHORT). Matches live spot executor.")
+    parser.add_argument("--fee-pct", type=float, default=0.0,
+                        help="Round-trip trading fee as %% of notional (default 0.0, e.g. 0.04 for 0.04%%)")
+    parser.add_argument("--sl-multiplier", type=float, default=0.5,
+                        help="ATR multiplier for stop-loss distance (default 0.5, e.g. 2.0 for 2x ATR)")
+    parser.add_argument("--no-kill-zone", action="store_true",
+                        help="Allow trading outside kill zones (default: False)")
     args = parser.parse_args()
 
     logger.remove()
@@ -702,8 +731,12 @@ async def main():
 
     symbols = [args.symbol.upper()] if args.symbol else SYMBOLS
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
-    print(f"  Both symbols: 0.5x SL, 0min cooldown, min_score=60")
+    print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown | min_score=60")
+    if args.fee_pct > 0:
+        print(f"  Fee: {args.fee_pct}% round-trip")
     print(f"  Symbols: {', '.join(symbols)}")
+    if args.no_kill_zone:
+        print(f"  KILL ZONES: OFF (trading all sessions)")
     if args.spot_only:
         print(f"  SPOT MODE: LONG only (SHORT signals filtered — matches live spot executor)")
     if args.debug:
@@ -724,12 +757,12 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only) for sym in symbols]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, no_kill_zone=args.no_kill_zone) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
             for sym in symbols:
-                r = await backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only)
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, no_kill_zone=args.no_kill_zone)
                 results.append(r)
                 print()
 

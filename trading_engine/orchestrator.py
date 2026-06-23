@@ -3,9 +3,8 @@ TradingOrchestrator — Unified Signal Pipeline.
 
 Single entry point for the entire trading pipeline:
   1. Generate ICT signals from candle data
-  2. Filter SHORT signals (spot-only — Binance Spot only supports LONG)
-  3. Feed signals to DemoAccount (in-memory paper trading)
-  4. Mirror opened positions to Binance Spot exchange
+  2. Feed signals to DemoAccount (in-memory paper trading)
+  3. Mirror opened positions to Binance Futures exchange
   5. Send Discord notifications for newly opened trades
   6. Reconcile positions periodically (SL/TP hit on exchange → close in DemoAccount)
 
@@ -41,7 +40,6 @@ class TradingOrchestrator:
     The orchestrator manages:
       - All 7 ICT modules (shared instances, created once)
       - Signal generation from incoming candle data
-      - Spot-mode SHORT signal filtering (always on)
       - DemoAccount state updates
       - Exchange order mirroring
       - Discord notifications
@@ -52,6 +50,7 @@ class TradingOrchestrator:
         demo_account: DemoAccount,
         live_executor: Optional[LiveExecutor] = None,
         discord_bot: Optional[DiscordBot] = None,
+        kill_zones_enabled: bool = True,
     ):
         self.demo = demo_account
         self.executor = live_executor
@@ -65,6 +64,10 @@ class TradingOrchestrator:
         self.ict_sessions = SessionDetector()
         self.ict_pd = PremiumDiscountDetector()
         self.signal_engine = SignalEngine()
+
+        # ── Kill zone filtering ───────────────────────────────────────
+        # When False, signals outside kill zones are still passed to DemoAccount
+        self.kill_zones_enabled = kill_zones_enabled
 
         # ── State tracking ───────────────────────────────────────────
         self._notified_symbols: Set[str] = set()  # Discord-already-sent per cycle
@@ -183,17 +186,10 @@ class TradingOrchestrator:
         for i, s in enumerate(all_signals):
             s["id"] = self.cycle_count * 100 + i
 
-        # ── STEP A: SPOT-ONLY FILTER ─────────────────────────────────
-        # Binance Spot only supports LONG. Remove ALL SHORT signals here
-        # so neither DemoAccount nor exchange ever sees them.
-        before_filter = len(all_signals)
-        all_signals = [s for s in all_signals if not s.get("signal_type", "").startswith("SELL")]
-        filtered_count = before_filter - len(all_signals)
-        if filtered_count > 0:
-            logger.info(f"[Orch][{symbol}] Filtered {filtered_count} SHORT signal(s) — spot only supports LONG")
-
-        if not all_signals:
-            return self._build_summary(symbol, [], current_prices)
+        # ── STEP A: FUTURES — both LONG and SHORT are supported ─────
+        # Binance Futures supports both directions. No SHORT filter needed.
+        # LONG/STRONG_BUY signals map to LONG positions.
+        # SELL/STRONG_SELL signals map to SHORT positions.
 
         self.total_signals_kept += len(all_signals)
 
@@ -204,6 +200,13 @@ class TradingOrchestrator:
             if live > 0 and s.get("price", 0) > 0:
                 s["trigger_price"] = s["price"]
                 s["price"] = live
+
+        # ── Kill zones override (when disabled) ─────────────────────
+        # DemoAccount.process_signals checks signal.get("in_kill_zone", False).
+        # When kill_zones_enabled is False, we override it so all signals pass through.
+        if not self.kill_zones_enabled:
+            for s in all_signals:
+                s["in_kill_zone"] = True
 
         # ── STEP B: Feed to DemoAccount ──────────────────────────────
         symbols_before: Set[str] = set(self.demo.open_positions.keys())
