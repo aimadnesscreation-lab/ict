@@ -846,8 +846,8 @@ async def get_signal_detail(signal_id: int):
 @app.get("/candles/{symbol}")
 async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
     symbol = symbol.upper()
-    if symbol not in {"BTCUSDT", "ETHUSDT"}:
-        return {"error": f"Unsupported symbol: {symbol}. Only BTCUSDT and ETHUSDT are available.", "data": []}
+    if symbol != "ETHUSDT":
+        return {"error": f"Unsupported symbol: {symbol}. Only ETHUSDT is available.", "data": []}
 
     try:
         tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -880,8 +880,8 @@ async def get_backtest_data(
 ):
     """Fetch paginated historical data from Binance for backtesting."""
     symbol = symbol.upper()
-    if symbol not in {"BTCUSDT", "ETHUSDT"}:
-        raise HTTPException(status_code=400, detail=f"Unsupported symbol: {symbol}")
+    if symbol != "ETHUSDT":
+        raise HTTPException(status_code=400, detail=f"Unsupported symbol: {symbol}. Only ETHUSDT is available.")
 
     try:
         per_day = {"1m": 720, "5m": 288, "15m": 96, "1H": 24, "4H": 6, "1D": 1}.get(bar, 288)
