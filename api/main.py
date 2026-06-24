@@ -571,7 +571,10 @@ async def _crypto_data_worker():
                                 "open": c[1], "high": c[2], "low": c[3], "close": c[4],
                                 "volume": c[5]
                             } for c in ohlcvs
-                        ]
+                        ][-288:]  # cap to 288 bars so live == backtest/REST window
+                        #         (the ICT premium/discount equilibrium is derived
+                        #         from the buffer, so a variable-length WS cache would
+                        #         drift the discount gate and silently drop signals)
 
                         latest_ts = ohlcvs[-1][0]
                         if symbol not in last_processed_ts:
