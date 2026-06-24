@@ -123,17 +123,30 @@ else
     warn "test_live_connection.py not found — skipping connection test."
 fi
 
-# ── Step 6: Check port availability ────────────────────────────
+# ── Step 6: Free our ports (auto-clean stale instances) ────────
+# Make ./start.sh idempotent: if a previous run (or a crashed instance) still
+# holds port 8000/5173, stop it automatically instead of aborting. This is what
+# lets you just run ./start.sh and have it work every time.
 if command -v lsof &>/dev/null; then
-    if lsof -ti:8000 &>/dev/null; then
-        err "Port 8000 is already in use. Stop the existing process and try again."
-        exit 1
-    fi
-    if lsof -ti:5173 &>/dev/null; then
-        err "Port 5173 is already in use. Stop the existing process and try again."
-        exit 1
-    fi
-    ok "Ports 8000 and 5173 are available"
+    for PORT in 8000 5173; do
+        PIDS=$(lsof -ti:$PORT 2>/dev/null || true)
+        if [ -n "$PIDS" ]; then
+            warn "Port $PORT in use by PID(s): $PIDS — stopping stale process(es)..."
+            kill $PIDS 2>/dev/null || true
+            # Give them a moment to exit, then force-kill anything left.
+            for _ in 1 2 3 4 5; do
+                sleep 1
+                REMAIN=$(lsof -ti:$PORT 2>/dev/null || true)
+                [ -z "$REMAIN" ] && break
+            done
+            REMAIN=$(lsof -ti:$PORT 2>/dev/null || true)
+            if [ -n "$REMAIN" ]; then
+                kill -9 $REMAIN 2>/dev/null || true
+                sleep 1
+            fi
+        fi
+    done
+    ok "Ports 8000 and 5173 are free"
 fi
 
 # ── Cleanup handler ─────────────────────────────────────────
@@ -157,7 +170,9 @@ trap cleanup SIGINT SIGTERM
 # ── Step 7: Start API server ────────────────────────────────
 echo ""
 info "Starting API server (uvicorn api.main:app)..."
-uvicorn api.main:app --host 0.0.0.0 --port 8000 &
+# Use the project venv's python explicitly. `which uvicorn` can resolve to a
+# DIFFERENT venv if one is already on PATH, so never rely on a bare `uvicorn`.
+"$SCRIPT_DIR/venv/bin/python" -m uvicorn api.main:app --host 0.0.0.0 --port 8000 &
 API_PID=$!
 
 # Wait for API to be ready
