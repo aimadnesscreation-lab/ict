@@ -2,13 +2,13 @@
 TradingOrchestrator — Unified Signal Pipeline.
 
 Single entry point for the entire trading pipeline:
-  1. Generate ICT signals from candle data
-  2. Feed signals to DemoAccount (in-memory paper trading)
-  3. Mirror opened positions to Binance Futures exchange
+  1. Run ICT pattern detection on candle data
+  2. Detect Combo 521 sweep+FVG patterns
+  3. Feed signals to DemoAccount (in-memory paper trading)
+  4. Mirror opened positions to Binance Futures exchange
   5. Send Discord notifications for newly opened trades
   6. Reconcile positions periodically (SL/TP hit on exchange → close in DemoAccount)
 
-No more scattered logic across api/main.py, signal_engine, sync_worker, etc.
 All coordination lives here.
 """
 
@@ -19,11 +19,10 @@ import polars as pl
 
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
-from ict_engine.order_blocks import OrderBlockDetector
 from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
-from signal_engine.engine import SignalEngine
+from signal_engine.combo521 import Combo521Detector
 from demo_account import DemoAccount
 from execution.executor import LiveExecutor
 from discord.bot import DiscordBot
@@ -57,13 +56,17 @@ class TradingOrchestrator:
         self.discord = discord_bot
 
         # ── ICT detectors (shared, created once) ─────────────────────
-        self.ict_ms = MarketStructure(n=3)
+        self.ict_ms = MarketStructure(n=2)  # swing_lookback=2 for Combo 521
         self.ict_fvg = FVGDetector()
-        self.ict_ob = OrderBlockDetector()
         self.ict_liquidity = LiquidityDetector(atr_threshold=0.10)
         self.ict_sessions = SessionDetector()
         self.ict_pd = PremiumDiscountDetector()
-        self.signal_engine = SignalEngine()
+        self.combo521 = Combo521Detector(
+            swing_lookback=2,
+            max_bars_after_sweep=20,
+            min_gap_pct=0.05,
+            entry_mode="proximal",
+        )
 
         # ── Kill zone filtering ───────────────────────────────────────
         # When False, signals outside kill zones are still passed to DemoAccount
@@ -94,102 +97,42 @@ class TradingOrchestrator:
         Called every time a new 5m candle closes.
 
         Steps:
-          1. Run ICT pipeline on 5m and 15m data
-          2. Generate signals via SignalEngine
-          3. Spot-only filter — remove ALL SHORT signals
-          4. Feed qualifying signals to DemoAccount
-          5. Mirror any newly opened positions to Binance
-          6. Send Discord notification per new position
+          1. Run Combo 521 ICT pipeline on 5m data (swing n=2, FVG, liquidity, PD, sessions)
+          2. Detect sweep+FVG pattern via Combo521Detector
+          3. Feed qualifying signals to DemoAccount
+          4. Mirror any newly opened positions to Binance
+          5. Send Discord notification per new position
+
+        No HTF bias filter, no scoring — pure sweep+FVG pattern detection.
 
         Returns a summary dict for API consumption.
         """
         self.cycle_count += 1
         self._notified_symbols.clear()
 
-        all_signals: List[Dict] = []
-        timeframes_to_check = ["5m", "15m"]
+        if df_5m.is_empty() or len(df_5m) < 30:
+            return self._build_summary(symbol, [], current_prices)
 
-        for tf in timeframes_to_check:
-            df = df_5m if tf == "5m" else df_15m
-            if df.is_empty() or len(df) < 20:
-                continue
+        # ── Combo 521 ICT pipeline on 5m data ────────────────────────
+        df = df_5m.clone()
+        df = self.ict_ms.detect_swings(df)
+        df = self.ict_fvg.detect_fvgs(df)
+        df = self.ict_liquidity.detect_all(df)
+        df = self.ict_sessions.detect_sessions(df)
+        df = self.ict_pd.compute_zones(df)
 
-            # ── Full ICT pipeline ────────────────────────────────────
-            df = self.ict_ms.detect_swings(df)
-            df = self.ict_ms.detect_bos_mss(df)
-            df = self.ict_fvg.detect_fvgs(df)
-            df = self.ict_ob.detect_order_blocks(df)
-            df = self.ict_liquidity.detect_all(df)
-            df = self.ict_sessions.detect_sessions(df)
-            df = self.ict_pd.compute_zones(df)
-
-            # Extract MSS and sweep from latest data
-            mss_type = None
-            if "mss" in df.columns:
-                latest_mss = df["mss"].drop_nulls().tail(1)
-                if len(latest_mss) > 0:
-                    mss_type = latest_mss[0]
-
-            sweep_type = None
-            if "liquidity_sweep_type" in df.columns:
-                latest_sweep = df["liquidity_sweep_type"].drop_nulls().tail(1)
-                if len(latest_sweep) > 0:
-                    sweep_type = latest_sweep[0]
-
-            # Generate signal
-            signal = self.signal_engine.generate_signal(
-                df,
-                mss_type=mss_type,
-                sweep_type=sweep_type,
-                timeframe=tf,
-                htf_bias=htf_bias,
-            )
-            signal["symbol"] = symbol
-
-            # Attach ATR for position sizing
-            if "atr" in df.columns:
-                latest_atr = df["atr"].tail(1).to_list()
-                signal["atr"] = latest_atr[0] if latest_atr and latest_atr[0] is not None else 0.0
-            else:
-                signal["atr"] = 0.0
-
-            # Confidence from score
-            score = signal.get("score", 0)
-            if score >= 80:
-                signal["confidence"] = 0.92
-            elif score >= 60:
-                signal["confidence"] = 0.75
-            elif score >= 40:
-                signal["confidence"] = 0.55
-            elif score >= 20:
-                signal["confidence"] = 0.35
-            else:
-                signal["confidence"] = 0.15
-
-            all_signals.append(signal)
+        # ── Detect Combo 521 patterns ────────────────────────────────
+        current_idx = len(df) - 1  # the just-closed candle is the last row
+        all_signals = self.combo521.detect(df, current_idx=current_idx, symbol=symbol)
 
         if not all_signals:
             return self._build_summary(symbol, [], current_prices)
 
         self.total_signals_generated += len(all_signals)
 
-        # ── HTF alignment filter ─────────────────────────────────────
-        # When bias is neutral (no clear trend), all signals pass through.
-        # When bias is bullish/bearish, only aligned signals are kept.
-        # The signal engine sets htf_aligned=True by default when bias is neutral.
-        all_signals = [s for s in all_signals if s.get("htf_aligned", True)]
-
-        if not all_signals:
-            return self._build_summary(symbol, [], current_prices)
-
         # ── Assign IDs ───────────────────────────────────────────────
         for i, s in enumerate(all_signals):
             s["id"] = self.cycle_count * 100 + i
-
-        # ── STEP A: FUTURES — both LONG and SHORT are supported ─────
-        # Binance Futures supports both directions. No SHORT filter needed.
-        # LONG/STRONG_BUY signals map to LONG positions.
-        # SELL/STRONG_SELL signals map to SHORT positions.
 
         self.total_signals_kept += len(all_signals)
 
@@ -202,8 +145,7 @@ class TradingOrchestrator:
                 s["price"] = live
 
         # ── Kill zones override (when disabled) ─────────────────────
-        # DemoAccount.process_signals checks signal.get("in_kill_zone", False).
-        # When kill_zones_enabled is False, we override it so all signals pass through.
+        # Combo521Detector already sets in_kill_zone=True, but ensure it
         if not self.kill_zones_enabled:
             for s in all_signals:
                 s["in_kill_zone"] = True
@@ -215,18 +157,16 @@ class TradingOrchestrator:
         # ── STEP C: Mirror new positions to Binance exchange ─────────
         if self.executor and self.executor.exchange:
             for sym, pos in list(self.demo.open_positions.items()):
-                # Only mirror positions that were JUST opened (not in symbols_before)
                 if sym in symbols_before:
                     continue
 
-                # Double-check: exchange already has a position for this symbol
                 try:
                     has_pos = await self.executor.has_position(sym)
                     if has_pos:
                         logger.info(f"[Orch][{sym}] Position already on exchange, skipping mirror")
                         continue
                 except Exception:
-                    pass  # If check fails, try to mirror anyway
+                    pass
 
                 try:
                     await self.executor.place_order(
@@ -236,6 +176,7 @@ class TradingOrchestrator:
                         price=pos.entry_price,
                         sl=pos.stop_loss,
                         tp=pos.take_profit,
+                        use_limit_order=True,
                     )
                     self.total_trades_executed += 1
                     logger.info(
@@ -249,11 +190,9 @@ class TradingOrchestrator:
         if self.discord:
             for s in all_signals:
                 sym = s.get("symbol", "")
-                # Only notify if this signal opened a new position AND we haven't notified for this symbol yet
                 if sym in self.demo.open_positions and sym not in symbols_before and sym not in self._notified_symbols:
                     self._notified_symbols.add(sym)
                     try:
-                        # Enrich the signal with trigger price for the embed
                         s["trigger_price"] = s.get("trigger_price", s.get("price", 0))
                         await self.discord.send_signal(s)
                     except Exception as e:

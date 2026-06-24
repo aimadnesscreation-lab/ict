@@ -62,7 +62,10 @@ class DemoAccount:
                  symbol_sl_multipliers: Optional[Dict[str, float]] = None,
                  symbol_min_scores: Optional[Dict[str, int]] = None,
                  spot_only: bool = False,
-                 db_manager=None):
+                 db_manager=None,
+                 tiered_sizing: bool = False,
+                 tp_ratio: float = 3.0):
+        self.tp_ratio = tp_ratio
         self.initial_balance = initial_balance
         self.balance = initial_balance
         self.equity = initial_balance
@@ -75,6 +78,7 @@ class DemoAccount:
         self.symbol_sl_multipliers = symbol_sl_multipliers or {}  # per-symbol ATR multiplier overrides
         self.symbol_min_scores = symbol_min_scores or {}  # per-symbol score threshold overrides
         self.spot_only = spot_only  # If True, SKIP all SHORT signals (for Binance Spot)
+        self.tiered_sizing = tiered_sizing  # If True, scale position size by signal score
         self.db = db_manager
         self.open_positions: Dict[str, OpenPosition] = {}  # keyed by symbol
         self.closed_trades: List[ClosedTrade] = []
@@ -194,7 +198,7 @@ class DemoAccount:
             if atr_value <= 0:
                 continue
 
-            new_pos = self._open_trade(symbol, signal_type, side, price, atr_value, timestamp)
+            new_pos = self._open_trade(symbol, signal_type, side, price, atr_value, timestamp, score=score)
             if new_pos:
                 logger.info(
                     f"Demo opened {side} {symbol} @ {price:.2f} "
@@ -356,10 +360,10 @@ class DemoAccount:
     # ── Internal ──────────────────────────────────────────────────────
 
     def _open_trade(self, symbol: str, signal_type: str, side: str,
-                    price: float, atr_value: float, timestamp) -> Optional[OpenPosition]:
+                    price: float, atr_value: float, timestamp, score: int = 0) -> Optional[OpenPosition]:
         """Open a new position with 1% risk, 1:2 RR.
 
-        Two modes:
+        Three modes:
           1. Fixed percentage (if fixed_sl_pct > 0):
              SL = fixed_sl_pct% from entry, TP = 2 × SL distance
              e.g. fixed_sl_pct=1.0 → SL 1% away, TP 2% away
@@ -367,6 +371,12 @@ class DemoAccount:
              Uses per-symbol multiplier from symbol_sl_multipliers if available,
              otherwise falls back to the default sl_multiplier.
              SL = multiplier × ATR, TP = 2 × SL distance
+          3. Tiered sizing (if tiered_sizing is True):
+             Scales risk based on signal score:
+               score < 70: 0.5x base risk
+               score 70-79: 0.75x base risk
+               score 80-89: 1.0x base risk (normal)
+               score 90+: 1.5x base risk
         """
         if self.fixed_sl_pct > 0:
             # Fixed percentage mode: SL = N% from entry, TP = 2× that
@@ -375,7 +385,7 @@ class DemoAccount:
             # ATR-based mode: use per-symbol override if available, else default
             effective_mult = self.symbol_sl_multipliers.get(symbol, self.sl_multiplier)
             sl_distance = atr_value * effective_mult
-        tp_distance = sl_distance * 2.0  # Fixed 1:2 risk-reward
+        tp_distance = sl_distance * self.tp_ratio  # Configurable R-multiple TP
 
         if side == "LONG":
             stop_loss = price - sl_distance
@@ -388,8 +398,19 @@ class DemoAccount:
         if risk_per_unit <= 0:
             return None
 
-        # Risk 1% of current balance
-        risk_amount = self.balance * (self.risk_per_trade_pct / 100)
+        # Risk 1% of current balance (adjustable via tiered sizing)
+        if self.tiered_sizing and score > 0:
+            if score >= 90:
+                sizing_mult = 1.5
+            elif score >= 80:
+                sizing_mult = 1.0
+            elif score >= 70:
+                sizing_mult = 0.75
+            else:
+                sizing_mult = 0.5
+        else:
+            sizing_mult = 1.0
+        risk_amount = self.balance * (self.risk_per_trade_pct / 100) * sizing_mult
         quantity = risk_amount / risk_per_unit
 
         pos = OpenPosition(

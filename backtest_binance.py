@@ -9,9 +9,9 @@ Runs months sequentially (oldest first → most recent) to avoid timeouts.
 Each month: ~8640 candles, full ICT pipeline.
 
 Usage:
-    python backtest_binance.py              # last 12 months (ETHUSDT)
+    python backtest_binance.py              # last 12 months (ETHUSDT, Combo 521)
     python backtest_binance.py --months 6   # last 6 months
-    python backtest_binance.py --symbol ETHUSDT --no-kill-zone  # single symbol, all sessions
+    python backtest_binance.py --symbol ETHUSDT --debug  # single symbol with per-trade analysis
 """
 
 import asyncio
@@ -27,11 +27,10 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
-from ict_engine.order_blocks import OrderBlockDetector
 from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
-from signal_engine.engine import SignalEngine, determine_bias_from_swings, determine_bias_from_ema
+from signal_engine.combo521 import Combo521Detector
 from demo_account import DemoAccount, ClosedTrade
 import json
 
@@ -43,13 +42,17 @@ SYMBOLS = ["ETHUSDT"]
 BACKTEST_CAPITAL = 5_000.0
 MAX_OPEN_POSITIONS = 3
 
-_ict_ms = MarketStructure(n=3)
+_ict_ms = MarketStructure(n=2)  # Combo 521: swing_lookback=2
 _ict_fvg = FVGDetector()
-_ict_ob = OrderBlockDetector()
 _ict_liquidity = LiquidityDetector(atr_threshold=0.10)
 _ict_sessions = SessionDetector()
 _ict_pd = PremiumDiscountDetector()
-_signal_engine = SignalEngine()
+_combo521 = Combo521Detector(
+    swing_lookback=2,
+    max_bars_after_sweep=20,
+    min_gap_pct=0.05,
+    entry_mode="proximal",
+)
 
 
 async def fetch_historical_data(symbol: str, bar: str, days: int,
@@ -132,81 +135,53 @@ async def fetch_historical_data(symbol: str, bar: str, days: int,
 
 
 def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
-    """Run the full 7-module ICT pipeline once on a DataFrame.
+    """Run Combo 521 ICT pipeline once on a DataFrame.
 
-    This is the critical optimization: instead of re-running the entire
-    ICT pipeline on every candle (as the old run_ict_on_buffer did),
-    we compute everything once in a single vectorized pass.
+    Only computes what Combo 521 needs:
+      - Market structure (swing n=2)
+      - FVG detection
+      - Liquidity sweeps
+      - Session detection
+      - Premium/discount zones
+
+    No OB, no MSS/BOS, no HTF bias.
     """
     df = df.clone()
     df = _ict_ms.detect_swings(df)
-    df = _ict_ms.detect_bos_mss(df)
     df = _ict_fvg.detect_fvgs(df)
-    df = _ict_ob.detect_order_blocks(df)
     df = _ict_liquidity.detect_all(df)
     df = _ict_sessions.detect_sessions(df)
     df = _ict_pd.compute_zones(df)
     return df
 
 
-def extract_signal_at_candle(df_ict: pl.DataFrame, candle_idx: int,
-                             htf_bias: str, current_price: float,
-                             min_score: int = 80,
-                             require_kill_zone: bool = True) -> Optional[Dict]:
+def extract_combo521_signal(df_ict: pl.DataFrame, candle_idx: int,
+                             symbol: str = "ETHUSDT",
+                             current_price: Optional[float] = None) -> Optional[Dict]:
     """
-    Extract signal from pre-computed ICT columns at a given candle index.
+    Detect Combo 521 signals at a given candle index.
 
-    Uses a tiny 5-row tail slice of the pre-computed DataFrame (instead of
-    re-running the full ICT pipeline on a 288-candle buffer every time).
+    Uses Combo521Detector to find sweep+FVG patterns with proximal entry,
+    premium/discount zone filter, and 20-bar lookback.
 
-    The signal engine's `generate_signal` only looks at:
-      - `df.tail(1)` for current price, timestamp, zone, OTE
-      - `df["fvg_type"].tail(5).any()` for recent FVG presence
-      - `df["ob_type"].tail(5).any()` for recent OB presence
-    So a 5-row slice is all we need.
+    Returns a single signal dict (best signal if multiple) or None.
     """
-    if candle_idx < 5:
+    if candle_idx < 25:  # Need enough warmup candles
         return None
 
-    # Tiny slice: just the last 5 closed candles (up to candle_idx - 1)
-    buf = df_ict.slice(candle_idx - 5, min(5, candle_idx))
-    if len(buf) < 2:
+    signals = _combo521.detect(df_ict, current_idx=candle_idx, symbol=symbol)
+    if not signals:
         return None
 
-    mss_type = None
-    if "mss" in buf.columns:
-        latest_mss = buf["mss"].drop_nulls().tail(1)
-        if len(latest_mss) > 0:
-            mss_type = latest_mss[0]
+    sig = signals[0]  # Take the first (most recent) signal
+    sig["id"] = None
 
-    sweep_type = None
-    if "liquidity_sweep_type" in buf.columns:
-        latest_sweep = buf["liquidity_sweep_type"].drop_nulls().tail(1)
-        if len(latest_sweep) > 0:
-            sweep_type = latest_sweep[0]
+    # Override price with current market price if provided
+    if current_price is not None and current_price > 0:
+        sig["trigger_price"] = sig["price"]
+        sig["price"] = current_price
 
-    latest_row = buf.tail(1).to_dicts()[0]
-    atr = latest_row.get("atr", 0) or 0.0
-
-    signal = _signal_engine.generate_signal(
-        buf, mss_type=mss_type, sweep_type=sweep_type,
-        timeframe="5m", htf_bias=htf_bias,
-    )
-    signal["symbol"] = ""
-    signal["id"] = None
-    signal["atr"] = atr
-
-    score = signal.get("score", 0)
-    signal_type = signal.get("signal_type", "NEUTRAL")
-    in_kz = signal.get("in_kill_zone", False)
-
-    if score < min_score or (require_kill_zone and not in_kz) or signal_type == "NEUTRAL":
-        return None
-    if htf_bias != "neutral" and not signal.get("htf_aligned", True):
-        return None
-
-    signal["price"] = current_price
-    return signal
+    return sig
 
 
 def check_position_vs_candle(pos, candle_high: float, candle_low: float, current_ts):
@@ -274,20 +249,24 @@ def close_position(demo, pos, exit_price, exit_reason, current_ts, fee_pct: floa
 async def backtest_symbol(symbol: str, chunk_size: int = 500,
                           before: Optional[str] = None,
                           debug: bool = False,
-                          spot_only: bool = False,
                           fee_pct: float = 0.0,
-                          sl_multiplier: float = 0.5,
-                          no_kill_zone: bool = False) -> Dict:
-    """Run 30-day backtest using DemoAccount.
+                          sl_multiplier: float = 1.5,
+                          risk_pct: float = 1.0) -> Dict:
+    """Run 30-day backtest using Combo 521 strategy + DemoAccount.
+
+    No HTF bias, no scoring, no kill zone requirements — pure
+    sweep+FVG pattern detection with proximal entry and 3R TP.
 
     Args:
         symbol: ETHUSDT (or any Binance Futures symbol)
         chunk_size: Candles per processing chunk
         before: ISO date to end the 30-day window (default: now)
         debug: Enable per-trade debug logging and analysis
-        spot_only: If True, only trade LONG (skip SHORT signals — matches live spot executor)
+        fee_pct: Round-trip fee %% (default 0.0)
+        sl_multiplier: ATR multiplier for SL (default 1.5, matches Combo 521)
+        risk_pct: Risk per trade as %% of balance (default 1.0)
     """
-    days = 30  # fixed 30-day window per month
+    days = 30
 
     # 1. Fetch 5m data for this window
     t0 = datetime.now(timezone.utc)
@@ -302,85 +281,48 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     logger.info(f"  Range: {data_range}, {len(df_5m_full)} candles "
                 f"[fetch: {(datetime.now(timezone.utc)-t0).total_seconds():.0f}s]")
 
-    # 2. Fetch 1h data for HTF bias
-    df_1h = await fetch_historical_data(symbol, "1H", days, before=before)
-    htf_bias = "neutral"
-    if not df_1h.is_empty() and len(df_1h) >= 26:
-        df_1h_init = df_1h.slice(0, min(168, len(df_1h)))
-        htf_bias = determine_bias_from_ema(df_1h_init, fast=12, slow=26, threshold_pct=0.5)
-        swing_bias = determine_bias_from_swings(_ict_ms.detect_swings(df_1h_init))
-        logger.info(f"  Initial HTF bias: {htf_bias.upper()} (EMA) swings: {swing_bias.upper()}")
-    else:
-        logger.info(f"  Initial HTF bias: neutral ({len(df_1h)} 1h candles)")
-
     rows = df_5m_full.to_dicts()
     total_candles = len(rows)
 
-    # Both symbols use same config per run
-    symbol_min_score = 60
-    require_kz = not no_kill_zone
-
     demo = DemoAccount(
-        initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=1.0,
+        initial_balance=BACKTEST_CAPITAL, risk_per_trade_pct=risk_pct,
         max_daily_loss_pct=3.0, max_open_positions=MAX_OPEN_POSITIONS,
         sl_multiplier=sl_multiplier,
         reentry_cooldown_minutes=0,
-        symbol_min_scores={symbol.upper(): symbol_min_score},
-        spot_only=spot_only,
+        symbol_min_scores={symbol.upper(): 0},  # Combo 521: bypass scoring
+        spot_only=False,
     )
 
     signals_gen = 0
-    signals_kept = 0
-    bias_changes = 0
-
-    # Debug tracking
     trade_log: List[Dict] = []
     current_trade_start: Dict[str, Dict] = {}
 
-    # Pre-compute all ICT columns once on the full 5m dataset
-    # This replaces the per-candle run_ict_on_buffer calls (~8,640 calls → 1 call)
-    logger.info(f"    Pre-computing ICT columns...")
+    # Pre-compute ICT columns once
+    logger.info(f"    Pre-computing ICT columns (swing_lookback=2)...")
     t_ict = datetime.now(timezone.utc)
     df_ict = precompute_ict(df_5m_full)
     ict_elapsed = (datetime.now(timezone.utc) - t_ict).total_seconds()
     logger.info(f"    ICT pre-compute: {ict_elapsed:.1f}s for {len(df_ict)} rows")
 
-    # 5. Process in chunks with periodic HTF bias recomputation
-    HTF_REFRESH_INTERVAL = 288  # ~1 day in 5m candles
-    warmup = 50  # need enough data for rolling indicators
+    warmup = 30  # need enough data for 20-bar lookback + safety margin
     i = warmup
-    last_bias_refresh = 0
 
     while i < total_candles:
         chunk_end = min(i + chunk_size, total_candles)
         chunk_rows = rows[i:chunk_end]
-
-        # Recompute HTF bias periodically
-        if i - last_bias_refresh >= HTF_REFRESH_INTERVAL:
-            current_ts = rows[i]["timestamp"]
-            df_1h_slice = df_1h.filter(pl.col("timestamp") <= current_ts)
-            df_1h_window = df_1h_slice.tail(min(168, len(df_1h_slice)))
-            if len(df_1h_window) >= 26:
-                new_bias = determine_bias_from_ema(df_1h_window, fast=12, slow=26, threshold_pct=0.5)
-                if new_bias != htf_bias:
-                    logger.info(f"    [Bias] {htf_bias.upper()} → {new_bias.upper()} @ candle {i}")
-                    htf_bias = new_bias
-                    bias_changes += 1
-            last_bias_refresh = i
 
         for j, current in enumerate(chunk_rows):
             current_price = current["close"]
             current_ts = current["timestamp"]
             candle_idx = i + j
 
-            # Step 1: Check open positions against candle H/L (every 5m candle)
+            # Step 1: Check open positions against candle H/L
             for sym in list(demo.open_positions.keys()):
                 if sym != symbol:
                     continue
                 pos = demo.open_positions[sym]
                 reason, price = check_position_vs_candle(pos, current["high"], current["low"], current_ts)
                 if reason is not None:
-                    # Debug: log trade before closing
                     if debug and sym in current_trade_start:
                         held = candle_idx - current_trade_start[sym].get("candle_idx", candle_idx)
                         trade_log.append({
@@ -408,35 +350,16 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                     if debug and sym in current_trade_start:
                         del current_trade_start[sym]
 
-            # Step 2: Extract signal from pre-computed ICT columns (fast: no pipeline re-run)
-            aligned = []
-            sig = extract_signal_at_candle(df_ict, candle_idx, htf_bias, current_price,
-                                             min_score=symbol_min_score,
-                                             require_kill_zone=require_kz)
+            # Step 2: Detect Combo 521 signal
+            sig = extract_combo521_signal(df_ict, candle_idx, symbol=symbol, current_price=current_price)
             if sig is not None:
-                sig["symbol"] = symbol
                 sig["timestamp"] = current_ts
                 signals_gen += 1
 
-                # HTF alignment filter
-                # When bias is neutral, signals pass through (no conflicting bias).
-                # The signal engine already sets htf_aligned=True when bias is neutral.
-                if htf_bias == "neutral" or sig.get("htf_aligned", True):
-                    aligned = [sig]
-                    signals_kept += 1
-
-            # Step 3: Spot mode filter — skip SHORT signals (not executable on spot)
-            if spot_only and aligned and aligned[0].get("signal_type", "").startswith("SELL"):
-                aligned = []
-
-            # When no_kill_zone is True, override signal's in_kill_zone so DemoAccount accepts it
-            if no_kill_zone and aligned:
-                aligned[0]["in_kill_zone"] = True
-
-            # Step 4: Feed signals to DemoAccount
+            # Step 3: Feed to DemoAccount
+            aligned = [sig] if sig else []
             prev_positions = set(demo.open_positions.keys())
             demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
-            # Debug: track when new positions open
             if debug:
                 for sym in demo.open_positions.keys():
                     if sym not in prev_positions:
@@ -467,7 +390,6 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     logger.info(f"  P&L: ${perf['total_profit']:.2f} | DD: {perf['max_drawdown']*100:.1f}% | "
                 f"Avg RR: {perf['avg_rr']:.2f} | Open: {len(open_pos)}")
 
-    # Build date range string from actual candle timestamps
     ts_min = df_5m_full['timestamp'].min().strftime('%b %d')
     ts_max = df_5m_full['timestamp'].max().strftime('%b %d')
     data_range_str = f"{ts_min} → {ts_max}"
@@ -475,13 +397,13 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     result = {
         "symbol": symbol, "month": str(before or "latest"),
         "data_range": data_range_str,
-        "htf_bias": htf_bias, "total_trades": perf["total_trades"],
+        "total_trades": perf["total_trades"],
         "wins": wins, "losses": losses, "breakeven": breakeven,
         "win_rate": perf["win_rate"], "total_profit": perf["total_profit"],
         "profit_factor": perf["profit_factor"], "max_drawdown": perf["max_drawdown"],
         "avg_rr": perf["avg_rr"], "capital_remaining": perf["capital_remaining"],
-        "signals_gen": signals_gen, "signals_kept": signals_kept,
-        "still_open": len(open_pos), "bias_changes": bias_changes,
+        "signals_gen": signals_gen,
+        "still_open": len(open_pos),
     }
     if debug:
         result["trade_log"] = trade_log
@@ -499,11 +421,10 @@ def print_month_result(month_num: int, month_label: str, data_range: str,
     results_to_print = [r for r in [r1, r2] if r is not None]
     for r in results_to_print:
         if r.get("total_trades", 0) == 0:
-            print(f"  {r['symbol']}: {r.get('result', 'No trades')} ({r.get('htf_bias', '?').upper()})")
+            print(f"  {r['symbol']}: {r.get('result', 'No trades')}")
             continue
 
-        print(f"  {r['symbol']}  ({r['htf_bias'].upper()})  "
-              f"Trades: {r['total_trades']}  "
+        print(f"  {r['symbol']}  Trades: {r['total_trades']}  "
               f"W:{r['wins']} L:{r['losses']} BE:{r['breakeven']}  "
               f"Open: {r['still_open']}")
         print(f"    WR: {r['win_rate']*100:.1f}%  "
@@ -686,21 +607,19 @@ async def main():
     parser.add_argument("--offset", type=int, default=None,
                         help="Run a single month at this offset (0=newest). Overrides --months.")
     parser.add_argument("--parallel", action="store_true",
-                        help="Run both symbols per month in parallel")
+                        help="Run symbols per month in parallel")
     parser.add_argument("--capital", type=float, default=None,
                         help="Starting capital (default: 5000)")
     parser.add_argument("--symbol", type=str, default=None,
-                        help="Symbol to backtest (default: ETHUSDT). Example: --symbol ETHUSDT")
+                        help="Symbol to backtest (default: ETHUSDT)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable detailed per-trade debug analysis")
-    parser.add_argument("--spot-only", action="store_true",
-                        help="Spot-only mode: only trade LONG signals (skip SHORT). Matches live spot executor.")
-    parser.add_argument("--fee-pct", type=float, default=0.0,
-                        help="Round-trip trading fee as %% of notional (default 0.0, e.g. 0.04 for 0.04%%)")
-    parser.add_argument("--sl-multiplier", type=float, default=2.0,
-                        help="ATR multiplier for stop-loss distance (default 2.0, matches live api/main.py config)")
-    parser.add_argument("--no-kill-zone", action="store_true",
-                        help="Allow trading outside kill zones (default: False)")
+    parser.add_argument("--fee-pct", type=float, default=0.06,
+                        help="Round-trip trading fee %% (default 0.06: 0.02%% maker entry + 0.04%% taker exit)")
+    parser.add_argument("--sl-multiplier", type=float, default=1.5,
+                        help="ATR multiplier for SL (default 1.5, matches Combo 521)")
+    parser.add_argument("--risk-pct", type=float, default=1.0,
+                        help="Risk per trade %% of balance (default 1.0)")
     args = parser.parse_args()
 
     logger.remove()
@@ -729,17 +648,14 @@ async def main():
         BACKTEST_CAPITAL = args.capital
 
     symbols = [args.symbol.upper()] if args.symbol else SYMBOLS
-    print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | 1% risk | 1:2 RR | 5m entries")
-    print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown | min_score=60")
-    if args.fee_pct > 0:
-        print(f"  Fee: {args.fee_pct}% round-trip")
+    print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | {args.risk_pct}% risk | 3R TP | 5m entries")
+    print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown")
+    print(f"  Strategy: Combo 521 (sweep+FVG, proximal entry, PD zone filter)")
     print(f"  Symbols: {', '.join(symbols)}")
-    if args.no_kill_zone:
-        print(f"  KILL ZONES: OFF (trading all sessions)")
-    if args.spot_only:
-        print(f"  SPOT MODE: LONG only (SHORT signals filtered — matches live spot executor)")
     if args.debug:
         print(f"  DEBUG MODE: enabled (per-trade analysis)")
+    if args.fee_pct > 0:
+        print(f"  Fee: {args.fee_pct}% round-trip")
     print("=" * 70 + "\n")
 
     all_trade_logs: List[Dict] = []
@@ -756,12 +672,12 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, no_kill_zone=args.no_kill_zone) for sym in symbols]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
             for sym in symbols:
-                r = await backtest_symbol(sym, before=before_str, debug=args.debug, spot_only=args.spot_only, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, no_kill_zone=args.no_kill_zone)
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct)
                 results.append(r)
                 print()
 
@@ -792,7 +708,6 @@ async def main():
                 "results": [
                     {
                         "symbol": r["symbol"],
-                        "htf_bias": r.get("htf_bias", "neutral"),
                         "trades": r["total_trades"],
                         "wins": r["wins"],
                         "losses": r["losses"],

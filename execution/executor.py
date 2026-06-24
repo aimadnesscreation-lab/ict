@@ -275,16 +275,22 @@ class LiveExecutor:
         price: float,
         sl: float,
         tp: float,
+        use_limit_order: bool = False,
     ) -> Optional[Dict]:
         """
-        Place Futures Market order with STOP_MARKET + TAKE_PROFIT_MARKET.
+        Place Futures order with STOP_MARKET + TAKE_PROFIT_MARKET.
+
+        Supports two entry modes:
+          - Market (default): type='market', taker fee (0.04%)
+          - Post-only limit: type='limit' with postOnly, maker fee (0.02%)
+            The limit price is set slightly off-market to ensure maker status.
+            If the order would be a taker, Binance rejects it (no fill).
 
         FUTURES: Supports both LONG and SHORT positions.
 
         Order flow:
           1. Set leverage for the symbol
-          2. Place a market entry order (buy for LONG, sell for SHORT)
-             with positionSide=LONG or positionSide=SHORT
+          2. Place entry order (market or limit post-only)
           3. Place a STOP_MARKET order (reduce-only) for stop-loss
           4. Place a TAKE_PROFIT_MARKET order (reduce-only) for take-profit
 
@@ -295,6 +301,8 @@ class LiveExecutor:
             price: Current market price (for reference/logging)
             sl: Stop-loss price
             tp: Take-profit price
+            use_limit_order: If True, use post-only limit order for entry
+                             (lower fee, may not fill immediately)
 
         Returns:
             Entry order dict on success, None on failure.
@@ -336,19 +344,49 @@ class LiveExecutor:
                 f"SL={sl} TP={tp}"
             )
 
-            # 2. Market Entry
-            # One-way mode: no positionSide param needed
-            entry = await self.exchange.create_order(
-                symbol=market_symbol,
-                type='market',
-                side=ccxt_side,
-                amount=amount,
-                params={}
-            )
+            # 2. Entry: market or post-only limit
+            if use_limit_order:
+                # Get price precision from loaded market data
+                price_decimals = 2  # default fallback
+                if self.exchange and self._markets_loaded:
+                    market = self.exchange.markets.get(market_symbol, {})
+                    prec = market.get('precision', {})
+                    price_tick = prec.get('price', 0.01)
+                    if price_tick > 0:
+                        price_decimals = max(1, -int(__import__('math').log10(price_tick)))
+
+                # Post-only limit order: price slightly off-market to be a maker
+                # LONG (buy): set price just below market to add liquidity
+                # SHORT (sell): set price just above market to add liquidity
+                if ccxt_side == 'buy':
+                    limit_price = round(price * 0.999, price_decimals)
+                else:
+                    limit_price = round(price * 1.001, price_decimals)
+                entry = await self.exchange.create_order(
+                    symbol=market_symbol,
+                    type='limit',
+                    side=ccxt_side,
+                    amount=amount,
+                    price=limit_price,
+                    params={'postOnly': True}
+                )
+                logger.info(f"  Post-only limit entry: {ccxt_side} {amount} @ {limit_price}")
+            else:
+                entry = await self.exchange.create_order(
+                    symbol=market_symbol,
+                    type='market',
+                    side=ccxt_side,
+                    amount=amount,
+                    params={}
+                )
 
             filled = float(entry.get('filled', 0))
             if filled <= 0:
-                filled = amount
+                if use_limit_order:
+                    logger.warning(f"  Limit order not yet filled, skipping SL/TP until next cycle")
+                    return None  # Don't count as a trade — orchestrator can retry
+                else:
+                    filled = amount
 
             avg_entry = float(entry.get('price', 0) or price)
             logger.info(

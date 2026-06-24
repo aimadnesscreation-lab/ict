@@ -93,32 +93,39 @@ async def test_mirror_opens_position_with_sufficient_signal():
         risk_per_trade_pct=1.0,
         max_open_positions=3,
         sl_multiplier=1.5,
-        symbol_min_scores={"ETHUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0},  # Combo 521: bypass scoring
         reentry_cooldown_minutes=0,
     )
     executor = make_mock_executor()
     orch = make_orchestrator(demo=demo, executor=executor, kill_zones_enabled=True)
     df_5m = make_5m_candles()
 
-    # Patch signal_engine.generate_signal to return a strong BUY
-    # The ICT detectors still run on real candle data, then our patched
-    # generate_signal produces the predetermined signal.
+    # Patch combo521.detect to return a BUY signal
+    now = datetime.now(timezone.utc)
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "bullish_score": 80, "bearish_score": 10, "net_score": 70,
-        "price": 1660.0, "timeframe": "5m", "bias": "bullish",
-        "htf_bias": "bullish", "htf_aligned": True, "in_kill_zone": True,
-        "atr": 15.0, "timestamp": datetime.now(timezone.utc),
-        "details": {},
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": True, "confidence": 0.75,
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
     # Verify DemoAccount opened a position
@@ -147,7 +154,7 @@ async def test_mirror_skips_already_mirrored():
         risk_per_trade_pct=1.0,
         max_open_positions=3,
         sl_multiplier=1.5,
-        symbol_min_scores={"ETHUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0},
         reentry_cooldown_minutes=0,
     )
     executor = make_mock_executor()
@@ -155,22 +162,31 @@ async def test_mirror_skips_already_mirrored():
     orch = make_orchestrator(demo=demo, executor=executor)
     df_5m = make_5m_candles()
 
+    now = datetime.now(timezone.utc)
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "bullish_score": 80, "bearish_score": 10, "net_score": 70,
-        "price": 1660.0, "timeframe": "5m", "bias": "bullish",
-        "htf_bias": "bullish", "htf_aligned": True, "in_kill_zone": True,
-        "atr": 15.0, "timestamp": datetime.now(timezone.utc),
-        "details": {},
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": True, "confidence": 0.75,
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
     # DemoAccount should have opened the position (signal passes all filters)
@@ -186,7 +202,7 @@ async def test_mirror_no_executor_skips_gracefully():
     When no LiveExecutor is configured, the orchestrator should
     skip the mirror step without errors.
     """
-    demo = DemoAccount(initial_balance=5000.0, symbol_min_scores={"ETHUSDT": 40})
+    demo = DemoAccount(initial_balance=5000.0, symbol_min_scores={"ETHUSDT": 0})
     orch = TradingOrchestrator(
         demo_account=demo,
         live_executor=None,  # No executor
@@ -195,21 +211,31 @@ async def test_mirror_no_executor_skips_gracefully():
 
     df_5m = make_5m_candles()
 
-    # Process candle close - should complete without error even with no executor
+    now = datetime.now(timezone.utc)
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "price": 1660.0, "atr": 15.0, "in_kill_zone": True,
-        "timestamp": datetime.now(timezone.utc), "htf_aligned": True,
-        "id": 1,
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": True, "confidence": 0.75,
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
     assert result is not None
@@ -225,27 +251,38 @@ async def test_kill_zones_disabled_allows_all_signals():
     """
     demo = DemoAccount(
         initial_balance=5000.0,
-        symbol_min_scores={"ETHUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0},
         reentry_cooldown_minutes=0,
     )
     orch = make_orchestrator(demo=demo, kill_zones_enabled=False)
     df_5m = make_5m_candles()
 
+    now = datetime.now(timezone.utc)
     # Signal outside kill zone
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "price": 1660.0, "atr": 15.0, "in_kill_zone": False,  # NOT in a kill zone
-        "timestamp": datetime.now(timezone.utc), "htf_aligned": True,
-        "id": 1,
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": False, "confidence": 0.75,  # NOT in a kill zone
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
     # DemoAccount should have opened a position because kill_zones_enabled=False
@@ -261,27 +298,38 @@ async def test_kill_zones_enabled_blocks_outside_signals():
     """
     demo = DemoAccount(
         initial_balance=5000.0,
-        symbol_min_scores={"ETHUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0},
         reentry_cooldown_minutes=0,
     )
     orch = make_orchestrator(demo=demo, kill_zones_enabled=True)
     df_5m = make_5m_candles()
 
+    now = datetime.now(timezone.utc)
     # Signal outside kill zone
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "price": 1660.0, "atr": 15.0, "in_kill_zone": False,  # NOT in a kill zone
-        "timestamp": datetime.now(timezone.utc), "htf_aligned": True,
-        "id": 1,
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": False, "confidence": 0.75,  # NOT in a kill zone
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
     # DemoAccount should NOT have opened a position because it's outside kill zone
@@ -289,39 +337,50 @@ async def test_kill_zones_enabled_blocks_outside_signals():
 
 
 @pytest.mark.asyncio
-async def test_htf_misalignment_blocks_signal():
+async def test_combo521_bypasses_scoring():
     """
-    Signals that are not aligned with HTF bias should be filtered out
-    before reaching DemoAccount.
+    Combo 521 uses pattern detection, not scoring. Signals fed to
+    DemoAccount should pass through regardless of score (min_score=0).
     """
     demo = DemoAccount(
         initial_balance=5000.0,
-        symbol_min_scores={"ETHUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0},  # Combo 521: no scoring threshold
         reentry_cooldown_minutes=0,
     )
     orch = make_orchestrator(demo=demo, kill_zones_enabled=True)
     df_5m = make_5m_candles()
 
-    # SELL signal with bullish HTF bias → not aligned → should be filtered
+    now = datetime.now(timezone.utc)
     signal = {
-        "symbol": "ETHUSDT", "signal_type": "SELL", "score": 75,
-        "price": 1660.0, "atr": 15.0, "in_kill_zone": True,
-        "timestamp": datetime.now(timezone.utc), "htf_aligned": False,  # Misaligned!
-        "id": 1,
+        "symbol": "ETHUSDT", "signal_type": "BUY", "score": 100,
+        "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+        "price": 1660.0, "atr": 15.0, "timeframe": "5m",
+        "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+        "in_kill_zone": True, "confidence": 0.75,
+        "timestamp": now,
+        "details": {
+            "sweep": True, "sweep_type": "BULLISH",
+            "bullish_fvg": True, "bearish_fvg": False,
+            "fvg": True, "ob": False, "mss": False, "discount": True,
+        },
+        "trigger_price": 1660.0,
+        "fvg_top": 1662.0, "fvg_bottom": 1658.0, "sweep_price": 1640.0,
+        "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
     }
 
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal):
+    with patch.object(orch.combo521, "detect", return_value=[signal]):
         result = await orch.process_candle_close(
             symbol="ETHUSDT",
             df_5m=df_5m,
             df_15m=pl.DataFrame(),
             current_prices={"ETHUSDT": 1660.0},
-            htf_bias="bullish",
+            htf_bias="neutral",
         )
 
-    # Signal should have been filtered out by HTF alignment check
-    assert len(result.get("signals", [])) == 0
-    assert "ETHUSDT" not in demo.open_positions
+    # Signal should pass through (Combo 521 doesn't filter by score or HTF alignment)
+    assert "ETHUSDT" in demo.open_positions
+    pos = demo.open_positions["ETHUSDT"]
+    assert pos.side == "LONG"
 
 
 @pytest.mark.asyncio
@@ -333,37 +392,44 @@ async def test_risk_limits_block_over_trading():
         initial_balance=5000.0,
         risk_per_trade_pct=1.0,
         max_open_positions=1,  # Only 1 position at a time
-        symbol_min_scores={"ETHUSDT": 40, "BTCUSDT": 40},
+        symbol_min_scores={"ETHUSDT": 0, "BTCUSDT": 0},
         reentry_cooldown_minutes=0,
     )
     orch = make_orchestrator(demo=demo, kill_zones_enabled=True)
     df_5m = make_5m_candles()
-    timestamp = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+
+    def make_signal(sym: str, price: float, atr: float) -> dict:
+        return {
+            "symbol": sym, "signal_type": "BUY", "score": 100,
+            "bullish_score": 100, "bearish_score": 0, "net_score": 100,
+            "price": price, "atr": atr, "timeframe": "5m",
+            "bias": "bullish", "htf_bias": "neutral", "htf_aligned": True,
+            "in_kill_zone": True, "confidence": 0.75,
+            "timestamp": now,
+            "details": {
+                "sweep": True, "sweep_type": "BULLISH",
+                "bullish_fvg": True, "bearish_fvg": False,
+                "fvg": True, "ob": False, "mss": False, "discount": True,
+            },
+            "trigger_price": price,
+            "fvg_top": price + 2.0, "fvg_bottom": price - 2.0,
+            "sweep_price": price - 20.0,
+            "gap_pct": 0.24, "fvg_idx": 30, "sweep_idx": 25,
+        }
 
     # Signal 1: ETH LONG
-    signal1 = {
-        "symbol": "ETHUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "price": 1660.0, "atr": 15.0, "in_kill_zone": True,
-        "timestamp": timestamp, "htf_aligned": True, "id": 1,
-    }
-
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal1):
+    with patch.object(orch.combo521, "detect", return_value=[make_signal("ETHUSDT", 1660.0, 15.0)]):
         result1 = await orch.process_candle_close(
             symbol="ETHUSDT", df_5m=df_5m, df_15m=pl.DataFrame(),
-            current_prices={"ETHUSDT": 1660.0}, htf_bias="bullish",
+            current_prices={"ETHUSDT": 1660.0}, htf_bias="neutral",
         )
     assert "ETHUSDT" in demo.open_positions  # ETH opened
 
     # Signal 2: BTC LONG (should be blocked by max_open_positions=1)
-    signal2 = {
-        "symbol": "BTCUSDT", "signal_type": "STRONG_BUY", "score": 85,
-        "price": 67000.0, "atr": 500.0, "in_kill_zone": True,
-        "timestamp": timestamp, "htf_aligned": True, "id": 2,
-    }
-
-    with patch.object(orch.signal_engine, "generate_signal", return_value=signal2):
+    with patch.object(orch.combo521, "detect", return_value=[make_signal("BTCUSDT", 67000.0, 500.0)]):
         result2 = await orch.process_candle_close(
             symbol="BTCUSDT", df_5m=df_5m, df_15m=pl.DataFrame(),
-            current_prices={"BTCUSDT": 67000.0}, htf_bias="bullish",
+            current_prices={"BTCUSDT": 67000.0}, htf_bias="neutral",
         )
     assert "BTCUSDT" not in demo.open_positions  # BTC blocked

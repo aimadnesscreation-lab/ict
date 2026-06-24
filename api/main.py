@@ -64,11 +64,12 @@ _demo_account = DemoAccount(
     initial_balance=DEMO_INITIAL_BALANCE, risk_per_trade_pct=MAX_RISK_PER_TRADE_PCT,
     max_daily_loss_pct=MAX_DAILY_LOSS_PCT,
     max_open_positions=MAX_OPEN_POSITIONS,
-    sl_multiplier=2.0,
+    sl_multiplier=1.5,  # Combo 521: 1.5x ATR for SL
     reentry_cooldown_minutes=0,
-    symbol_min_scores={"ETHUSDT": 60},
+    symbol_min_scores={"ETHUSDT": 0},  # Combo 521: bypass scoring, uses pattern detection
     spot_only=False,  # Binance Futures — supports both LONG and SHORT
     db_manager=_db,
+    tp_ratio=3.0,  # Combo 521: 3R take profit
 )
 
 _live_executor = LiveExecutor(mode=os.getenv("EXCHANGE_MODE", "demo"))
