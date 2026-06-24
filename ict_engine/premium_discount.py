@@ -22,33 +22,43 @@ from typing import Dict, Optional, Tuple
 class PremiumDiscountDetector:
     """Detect premium/discount zones and calculate OTE levels."""
 
-    def __init__(self):
+    def __init__(self, lookback: int = 288):
+        # lookback bounds the dealing-range computation to a FIXED number of
+        # recent bars. Without this, the range was derived from the last swing
+        # over the *entire* input buffer, so a variable-length live buffer would
+        # shift `equilibrium` and silently flip the discount/premium gate that
+        # signals depend on. A fixed lookback keeps live == backtest.
+        self.lookback = lookback
         self.last_swing_high: Optional[float] = None
         self.last_swing_low: Optional[float] = None
 
     def _get_range_high_low(self, df: pl.DataFrame) -> Tuple[Optional[float], Optional[float]]:
         """
-        Determine the dealing range from the most recent swing points.
-        Falls back to recent price range if swings are unavailable.
+        Determine the dealing range from the most recent swing points within a
+        FIXED lookback window. Falls back to recent price range if swings are
+        unavailable.
         """
+        # Bound to a fixed recent window so the range is buffer-length-invariant.
+        window = df.tail(self.lookback) if len(df) > self.lookback else df
+
         swing_high = None
         swing_low = None
 
-        if "swing_high" in df.columns:
-            recent_highs = df["swing_high"].drop_nulls()
+        if "swing_high" in window.columns:
+            recent_highs = window["swing_high"].drop_nulls()
             if len(recent_highs) > 0:
                 swing_high = recent_highs[-1]
 
-        if "swing_low" in df.columns:
-            recent_lows = df["swing_low"].drop_nulls()
+        if "swing_low" in window.columns:
+            recent_lows = window["swing_low"].drop_nulls()
             if len(recent_lows) > 0:
                 swing_low = recent_lows[-1]
 
         # Fallback to recent candle range
         if swing_high is None:
-            swing_high = df["high"].tail(20).max()
+            swing_high = window["high"].tail(20).max()
         if swing_low is None:
-            swing_low = df["low"].tail(20).min()
+            swing_low = window["low"].tail(20).min()
 
         return (swing_high, swing_low)
 
