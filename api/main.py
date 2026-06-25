@@ -541,8 +541,17 @@ async def _crypto_data_worker():
             if not candles or len(candles) < 2:
                 return
 
-            # Update buffer
-            _candle_buffers.setdefault(symbol, {})["5m"] = candles
+            # UPSERT REST candles into existing buffer (same merge logic as WS handler)
+            _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
+            existing = _candle_buffers[symbol]["5m"]
+            if existing:
+                lookup = {c["timestamp"]: c for c in existing}
+                for c in candles:
+                    lookup[c["timestamp"]] = c
+                merged = sorted(lookup.values(), key=lambda x: x["timestamp"])
+            else:
+                merged = candles[:]
+            _candle_buffers[symbol]["5m"] = merged[-288:]
 
             latest_ts = int(candles[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
             if symbol not in last_processed_ts:
@@ -565,16 +574,33 @@ async def _crypto_data_worker():
                         if not ohlcvs:
                             continue
 
-                        _candle_buffers.setdefault(symbol, {})["5m"] = [
+                        # Convert WS candles to dicts
+                        ws_candles = [
                             {
                                 "timestamp": datetime.fromtimestamp(c[0] / 1000, tz=timezone.utc).replace(tzinfo=None),
                                 "open": c[1], "high": c[2], "low": c[3], "close": c[4],
                                 "volume": c[5]
                             } for c in ohlcvs
-                        ][-288:]  # cap to 288 bars so live == backtest/REST window
-                        #         (the ICT premium/discount equilibrium is derived
-                        #         from the buffer, so a variable-length WS cache would
-                        #         drift the discount gate and silently drop signals)
+                        ]
+                        # UPSERT WS candles into existing buffer instead of replacing it.
+                        # This prevents the buffer from shrinking if CCXT Pro returns
+                        # an incomplete cache (e.g. after a WS reconnect).
+                        # Uses timestamp-keyed dict so existing candles get UPDATED
+                        # with final OHLCV data when a candle closes (critical for
+                        # correct signal detection).
+                        _candle_buffers.setdefault(symbol, {}).setdefault("5m", [])
+                        existing = _candle_buffers[symbol]["5m"]
+                        if existing:
+                            # Build lookup: timestamp → candle
+                            lookup = {c["timestamp"]: c for c in existing}
+                            # Upsert: update existing + add new
+                            for c in ws_candles:
+                                lookup[c["timestamp"]] = c
+                            # Convert back to sorted list
+                            merged = sorted(lookup.values(), key=lambda x: x["timestamp"])
+                        else:
+                            merged = ws_candles[:]
+                        _candle_buffers[symbol]["5m"] = merged[-288:]
 
                         latest_ts = ohlcvs[-1][0]
                         if symbol not in last_processed_ts:
@@ -618,6 +644,18 @@ async def _crypto_data_worker():
                 _health["last_error_time"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
                 _health["last_error_message"] = f"OHLCV {symbol}: {e}"
                 await asyncio.sleep(10)
+
+    # Log buffer size periodically for diagnostics
+    async def _buffer_diag_logger():
+        """Log candle buffer stats every 5 minutes for debugging."""
+        while True:
+            await asyncio.sleep(300)
+            for sym in SYMBOLS:
+                buf = _candle_buffers.get(sym, {}).get("5m", [])
+                if buf:
+                    ts_from = buf[0]["timestamp"]
+                    ts_to = buf[-1]["timestamp"]
+                    logger.info(f"[Diag] {sym} 5m buffer: {len(buf)} candles, {ts_from} → {ts_to}")
 
     # Always-on REST ticker poller: fetches real Binance price every 30s
     # regardless of WebSocket state. This is the safety net that ensures
@@ -670,12 +708,13 @@ async def _crypto_data_worker():
         except Exception as e:
             logger.warning(f"[Ticker] Initial REST seed failed: {e}")
 
-        # Run ticker watcher, REST ticker poller, and OHLCV watchers in parallel
+        # Run ticker watcher, REST ticker poller, buffer diag, and OHLCV watchers in parallel
         ticker_task = asyncio.create_task(handle_tickers())
         rest_ticker_task = asyncio.create_task(_rest_ticker_poller())
+        diag_task = asyncio.create_task(_buffer_diag_logger())
         ohlcv_tasks = [asyncio.create_task(handle_ohlcv(s)) for s in SYMBOLS]
         
-        await asyncio.gather(ticker_task, rest_ticker_task, *ohlcv_tasks)
+        await asyncio.gather(ticker_task, rest_ticker_task, diag_task, *ohlcv_tasks)
     except asyncio.CancelledError:
         logger.info("[WS] Worker shutting down...")
     except Exception as e:
