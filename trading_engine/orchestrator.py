@@ -176,7 +176,7 @@ class TradingOrchestrator:
                         price=pos.entry_price,
                         sl=pos.stop_loss,
                         tp=pos.take_profit,
-                        use_limit_order=True,
+                        use_limit_order=False,  # market entry so orders fill immediately
                     )
                     self.total_trades_executed += 1
                     logger.info(

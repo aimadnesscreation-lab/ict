@@ -35,8 +35,15 @@ class DBSignal(Base):  # type: ignore[valid-type,misc]
     symbol = Column(String)
     signal_type = Column(String)
     score = Column(Integer)
+    bullish_score = Column(Integer, default=0)
+    bearish_score = Column(Integer, default=0)
+    net_score = Column(Integer, default=0)
     price = Column(Float)
     timeframe = Column(String)
+    bias = Column(String, default="neutral")
+    htf_bias = Column(String, default="neutral")
+    htf_aligned = Column(Boolean, default=True)
+    in_kill_zone = Column(Boolean, default=False)
     details = Column(Text) # JSON string
 
 class DBAccountState(Base):  # type: ignore[valid-type,misc]
@@ -80,8 +87,18 @@ class DatabaseManager:
     async def save_signal(self, signal_data: Dict):
         async with self.async_session() as session:
             details = signal_data.pop('details', {})
+            # Only pass columns that exist on DBSignal — the signal dict from
+            # Combo521Detector contains many extra fields (trigger_price, fvg_top,
+            # sweep_price, gap_pct, etc.) that are not DB columns.
+            valid_columns = {
+                "timestamp", "symbol", "signal_type", "score",
+                "bullish_score", "bearish_score", "net_score",
+                "price", "timeframe", "bias", "htf_bias",
+                "htf_aligned", "in_kill_zone",
+            }
+            filtered = {k: v for k, v in signal_data.items() if k in valid_columns}
             db_signal = DBSignal(
-                **signal_data,
+                **filtered,
                 details=json.dumps(details)
             )
             session.add(db_signal)
