@@ -411,10 +411,12 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
 
 
 def print_month_result(month_num: int, month_label: str, data_range: str,
-                       r1: Dict, r2: Optional[Dict] = None):
+                       r1: Dict, r2: Optional[Dict] = None,
+                       starting_cap: Optional[float] = None):
     """Print a formatted monthly result block."""
     print(f"\n  {'─'*60}")
-    print(f"  Month {month_num}/12 — {month_label}")
+    cap_info = f" (cap=${starting_cap:,.0f})" if starting_cap else ""
+    print(f"  Month {month_num}/12 — {month_label}{cap_info}")
     print(f"  {data_range}")
     print(f"  {'─'*60}")
 
@@ -434,8 +436,11 @@ def print_month_result(month_num: int, month_label: str, data_range: str,
               f"RR: {r['avg_rr']:.2f}")
 
 
-def print_combined_summary(all_results: List[Dict], num_months: int):
+def print_combined_summary(all_results: List[Dict], num_months: int,
+                            opening_capital: Optional[float] = None):
     """Print aggregated multi-month summary, grouped by symbol."""
+    if opening_capital is None:
+        opening_capital = BACKTEST_CAPITAL
     print(f"\n\n{'='*70}")
     print(f"  {num_months}-MONTH COMBINED SUMMARY")
     print(f"{'='*70}")
@@ -493,7 +498,14 @@ def print_combined_summary(all_results: List[Dict], num_months: int):
         wr = 0
     print(f"  Win rate:     {wr:.1f}%")
     print(f"  Total P&L:    ${combined_profit:.2f}")
-    print(f"  Total return: {(combined_profit / BACKTEST_CAPITAL) * 100:.2f}%")
+    # Use opening capital for return calc (passed in as param to avoid mutated module-level var)
+    final_capitals = {r["symbol"]: r.get("capital_remaining", 0) for r in all_results[-len(by_symbol):]}
+    final_cap = max(final_capitals.values()) if final_capitals else 0
+    if final_cap > 0 and abs(final_cap - opening_capital) > 0.01:
+        print(f"  Final capital: ${final_cap:,.2f}")
+        print(f"  Total return:  {(final_cap - opening_capital) / opening_capital * 100:.2f}%")
+    else:
+        print(f"  Total return: {(combined_profit / opening_capital) * 100:.2f}%")
     print(f"  Avg monthly:  ${combined_profit / num_months:.2f}")
 
 
@@ -620,6 +632,8 @@ async def main():
                         help="ATR multiplier for SL (default 1.5, matches Combo 521)")
     parser.add_argument("--risk-pct", type=float, default=1.0,
                         help="Risk per trade %% of balance (default 1.0)")
+    parser.add_argument("--compound", action="store_true",
+                        help="Compound capital across months (don't reset to initial each month)")
     args = parser.parse_args()
 
     logger.remove()
@@ -652,12 +666,16 @@ async def main():
     print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown")
     print(f"  Strategy: Combo 521 (sweep+FVG, proximal entry, PD zone filter)")
     print(f"  Symbols: {', '.join(symbols)}")
+    if args.compound:
+        print(f"  Mode: COMPOUNDING (capital carries across months)")
     if args.debug:
         print(f"  DEBUG MODE: enabled (per-trade analysis)")
     if args.fee_pct > 0:
         print(f"  Fee: {args.fee_pct}% round-trip")
     print("=" * 70 + "\n")
 
+    # Save initial capital for compound mode return calculation
+    initial_capital = BACKTEST_CAPITAL
     all_trade_logs: List[Dict] = []
 
     for month_idx, month_offset in enumerate(offsets):
@@ -690,8 +708,15 @@ async def main():
             dr_parts[sym] = r.get("data_range", "") if r.get("total_trades", 0) > 0 else "(no data)"
         data_range = " | ".join(f"{k}: {v}" for k, v in dr_parts.items())
 
-        print_month_result(month_idx + 1, month_label, data_range, r1, r2)
+        print_month_result(month_idx + 1, month_label, data_range, r1, r2, starting_cap=initial_capital if not args.compound else None)
         all_raw_results.extend(results)
+
+        # ── Compounding: carry capital forward to next month ────────
+        if args.compound and args.offset is None:
+            cap_remaining = r.get("capital_remaining", BACKTEST_CAPITAL)
+            if cap_remaining > 0:
+                BACKTEST_CAPITAL = cap_remaining
+                logger.info(f"  [Compound] Capital carried forward: ${BACKTEST_CAPITAL:.2f}")
 
         # Collect debug trade logs
         if args.debug:
@@ -725,7 +750,7 @@ async def main():
             print(f"\n  JSON:{json.dumps(summary)}")
 
     if args.offset is None:
-        print_combined_summary(all_raw_results, num_months)
+        print_combined_summary(all_raw_results, num_months, opening_capital=initial_capital)
 
         print(f"\n\n{'='*70}")
         print(f"  MONTHLY BREAKDOWN")
