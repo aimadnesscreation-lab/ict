@@ -20,7 +20,6 @@ import polars as pl
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.liquidity import LiquidityDetector
-from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from signal_engine.combo521 import Combo521Detector
 from demo_account import DemoAccount
@@ -37,7 +36,7 @@ class TradingOrchestrator:
         await orch.process_candle_close(symbol, df_5m, df_15m, latest_prices, htf_bias)
 
     The orchestrator manages:
-      - All 7 ICT modules (shared instances, created once)
+      - Necessary ICT modules (Swings, FVG, Liquidity, PD)
       - Signal generation from incoming candle data
       - DemoAccount state updates
       - Exchange order mirroring
@@ -49,17 +48,17 @@ class TradingOrchestrator:
         demo_account: DemoAccount,
         live_executor: Optional[LiveExecutor] = None,
         discord_bot: Optional[DiscordBot] = None,
-        kill_zones_enabled: bool = True,
+        kill_zones_enabled: bool = False,
     ):
         self.demo = demo_account
         self.executor = live_executor
         self.discord = discord_bot
+        self.kill_zones_enabled = kill_zones_enabled
 
         # ── ICT detectors (shared, created once) ─────────────────────
         self.ict_ms = MarketStructure(n=2)  # swing_lookback=2 for Combo 521
         self.ict_fvg = FVGDetector()
         self.ict_liquidity = LiquidityDetector(atr_threshold=0.10)
-        self.ict_sessions = SessionDetector()
         self.ict_pd = PremiumDiscountDetector()
         self.combo521 = Combo521Detector(
             swing_lookback=2,
@@ -67,10 +66,6 @@ class TradingOrchestrator:
             min_gap_pct=0.05,
             entry_mode="proximal",
         )
-
-        # ── Kill zone filtering ───────────────────────────────────────
-        # When False, signals outside kill zones are still passed to DemoAccount
-        self.kill_zones_enabled = kill_zones_enabled
 
         # ── State tracking ───────────────────────────────────────────
         self._notified_symbols: Set[str] = set()  # Discord-already-sent per cycle
@@ -97,7 +92,7 @@ class TradingOrchestrator:
         Called every time a new 5m candle closes.
 
         Steps:
-          1. Run Combo 521 ICT pipeline on 5m data (swing n=2, FVG, liquidity, PD, sessions)
+          1. Run Combo 521 ICT pipeline on 5m data (swing n=2, FVG, liquidity, PD)
           2. Detect sweep+FVG pattern via Combo521Detector
           3. Feed qualifying signals to DemoAccount
           4. Mirror any newly opened positions to Binance
@@ -118,7 +113,6 @@ class TradingOrchestrator:
         df = self.ict_ms.detect_swings(df)
         df = self.ict_fvg.detect_fvgs(df)
         df = self.ict_liquidity.detect_all(df)
-        df = self.ict_sessions.detect_sessions(df)
         df = self.ict_pd.compute_zones(df)
 
         # ── Detect Combo 521 patterns ────────────────────────────────
@@ -145,7 +139,6 @@ class TradingOrchestrator:
                 s["price"] = live
 
         # ── Kill zones override (when disabled) ─────────────────────
-        # Combo521Detector already sets in_kill_zone=True, but ensure it
         if not self.kill_zones_enabled:
             for s in all_signals:
                 s["in_kill_zone"] = True
@@ -208,10 +201,6 @@ class TradingOrchestrator:
     ) -> Dict:
         """
         Reconcile DemoAccount's open positions with actual Binance positions.
-        Handles: SL/TP hit on exchange, manual closes, partial fills.
-
-        This is the sync_worker logic, embedded directly in the orchestrator
-        so there's no cross-module coordination needed.
         """
         from execution.sync_worker import sync_positions
 
@@ -271,9 +260,6 @@ class TradingOrchestrator:
             self.demo.get_open_positions_list(), dict(current_prices),
         )
 
-        # Build performance dict with open positions — api/main.py stores
-        # the "performance" key in _performance_cache. The /demo/account
-        # endpoint reads open_positions from it, so we need those keys here.
         perf = self.demo.get_performance()
         perf["open_positions_count"] = len(open_positions)
         perf["open_positions"] = open_positions

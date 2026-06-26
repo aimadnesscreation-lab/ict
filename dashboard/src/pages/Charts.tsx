@@ -15,7 +15,7 @@ export default function Charts() {
   const [timeframe, setTimeframe] = useState('1h');
   const { prices } = usePriceStream();
 
-  const limit = timeframe === '5m' ? 288 : timeframe === '15m' ? 168 : 200;
+  const limit = timeframe === '5m' ? 1000 : timeframe === '15m' ? 500 : 500;
 
   const { data: candles = [], isLoading } = useQuery({
     queryKey: ['candles', symbol, timeframe, limit],

@@ -5,10 +5,8 @@ import type { SignalWeights } from '../services/settingsService';
 
 export interface SignalFlags {
   bias: 'bullish' | 'bearish' | 'neutral';
-  mss: boolean;
   sweep: boolean;
   fvg: boolean;
-  ob: boolean;
 }
 
 export interface ComputedSignal {
@@ -32,19 +30,13 @@ export function deriveFlags(tick: PriceTick): SignalFlags {
   const bias: SignalFlags['bias'] =
     change > 0.3 ? 'bullish' : change < -0.3 ? 'bearish' : 'neutral';
 
-  // MSS: significant directional impulse (>1.2% change signals structure shift)
-  const mss = Math.abs(change) > 1.2;
-
   // Liquidity Sweep: price near the 24h high or low extremes
   const sweep = posInRange < 0.08 || posInRange > 0.92;
 
   // FVG: rapid move of >0.8% implies an imbalance window
   const fvg = Math.abs(change) > 0.8;
 
-  // Order Block: price hovering near the middle of range (institutional zone)
-  const ob = posInRange > 0.35 && posInRange < 0.65;
-
-  return { bias, mss, sweep, fvg, ob };
+  return { bias, sweep, fvg };
 }
 
 // ── Weighted scoring ──────────────────────────────────────────────────
@@ -73,15 +65,13 @@ export function computeSignal(
   let score = 0;
 
   // Bias is directional — only add weight if direction matches
-  // (the engine treats bias as bullish → add, bearish → 0)
   if (flags.bias === 'bullish') {
     score += weights.bias;
   }
 
-  if (flags.mss) score += weights.mss;
   if (flags.sweep) score += weights.liquidity_sweep;
   if (flags.fvg) score += weights.fvg;
-  if (flags.ob) score += weights.order_block;
+
   // Invert for bearish bias: score becomes "strength of bearish signal"
   if (flags.bias === 'bearish') {
     // A lower raw score → stronger sell

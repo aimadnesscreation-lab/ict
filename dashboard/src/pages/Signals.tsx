@@ -160,10 +160,8 @@ export default function Signals() {
                     <td className="px-6 py-4 text-slate-500 text-xs whitespace-nowrap">{formatTimeAgo(signal.timestamp)}</td>
                     <td className="px-6 py-4">
                       <div className="flex gap-1.5">
-                        <Flag active={signal.meta_data.mss} label="MSS" />
                         <Flag active={signal.meta_data.sweep} label="SWP" />
                         <Flag active={signal.meta_data.fvg} label="FVG" />
-                        <Flag active={signal.meta_data.ob} label="OB" />
                       </div>
                     </td>
                   </tr>
@@ -222,12 +220,9 @@ export default function Signals() {
             <div className="mb-4">
               <h4 className="text-sm font-bold text-slate-400 mb-3 uppercase">Confluences</h4>
               <div className="grid grid-cols-2 gap-3">
-                <DetailFlag active={selected.meta_data.mss} label="Market Structure Shift" />
                 <DetailFlag active={selected.meta_data.sweep} label="Liquidity Sweep" />
                 <DetailFlag active={selected.meta_data.fvg} label="Fair Value Gap" />
-                <DetailFlag active={selected.meta_data.ob} label="Order Block" />
                 <DetailFlag active={selected.meta_data.discount} label="Discount Zone" />
-                <DetailFlag active={selected.meta_data.ote} label="OTE Zone" />
               </div>
             </div>
             <div className="bg-slate-950 rounded-xl p-4 border border-slate-800">

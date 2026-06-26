@@ -25,18 +25,12 @@ export interface Signal {
   confidence: number;
   in_kill_zone: boolean;
   meta_data: {
-    mss: boolean;
-    mss_type: string | null;
     sweep: boolean;
     sweep_type: string | null;
     bullish_fvg: boolean;
     bearish_fvg: boolean;
-    bullish_ob: boolean;
-    bearish_ob: boolean;
     fvg: boolean;
-    ob: boolean;
     discount: boolean;
-    ote: boolean;
     bias: string;
     in_kill_zone: boolean;
     htf_bias: string;

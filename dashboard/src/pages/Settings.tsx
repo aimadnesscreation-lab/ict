@@ -1,18 +1,17 @@
 import { useMemo } from 'react';
-import { Settings as SettingsIcon, RotateCcw, Sliders, ShieldCheck, TrendingUp, TrendingDown, Radio, Activity, Gauge, Wifi, WifiOff } from 'lucide-react';
+import { Settings as SettingsIcon, RotateCcw, Sliders, ShieldCheck, TrendingUp, Activity, Gauge, Wifi, WifiOff } from 'lucide-react';
 import { useSettings, DEFAULT_SETTINGS } from '../services/settingsService';
 import { usePriceStream } from '../hooks/usePriceStream';
 import { computeSignal } from '../utils/signalCalculator';
 import { cn, shortenSymbol } from '../utils/format';
 import type { SignalWeights, RiskSettings } from '../services/settingsService';
 import type { ComputedSignal } from '../utils/signalCalculator';
+import { TrendingDown } from 'lucide-react';
 
 const weightMeta: { key: keyof SignalWeights; label: string; desc: string; icon: React.ReactNode; color: string }[] = [
   { key: 'bias', label: 'HTF Bias', desc: 'Higher timeframe trend bias', icon: <TrendingUp size={18} />, color: 'text-emerald-400' },
-  { key: 'mss', label: 'Market Structure Shift', desc: 'CHoCH / MSS detection', icon: <Radio size={18} />, color: 'text-cyan-400' },
   { key: 'liquidity_sweep', label: 'Liquidity Sweep', desc: 'Liquidity grab detection', icon: <Activity size={18} />, color: 'text-amber-400' },
   { key: 'fvg', label: 'Fair Value Gap', desc: 'Imbalance / FVG detection', icon: <Activity size={18} />, color: 'text-purple-400' },
-  { key: 'order_block', label: 'Order Block', desc: 'Institutional order block', icon: <ShieldCheck size={18} />, color: 'text-rose-400' },
 ];
 
 const riskMeta: { key: keyof RiskSettings; label: string; desc: string; suffix: string; min: number; max: number; step: number }[] = [
@@ -85,7 +84,7 @@ export default function SettingsPage() {
                 </div>
                 <input type="range" value={settings.signalWeights[key]}
                   onChange={e => updateSignalWeight(key, parseInt(e.target.value))}
-                  min={0} max={40}
+                  min={0} max={100}
                   className="w-full h-1.5 bg-slate-800 rounded-full appearance-none cursor-pointer accent-emerald-500 
                     [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-4 [&::-webkit-slider-thumb]:h-4 
                     [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-emerald-500 
@@ -94,7 +93,7 @@ export default function SettingsPage() {
                 <div className="flex justify-between text-[10px] text-slate-600 mt-0.5">
                   <span>0</span>
                   <span>{DEFAULT_SETTINGS.signalWeights[key]}</span>
-                  <span>40</span>
+                  <span>100</span>
                 </div>
               </div>
             ))}
@@ -204,10 +203,8 @@ function SignalRow({ signal }: { signal: ComputedSignal }) {
   const isUp = change_24h >= 0;
   const flagStates = [
     { key: 'Bias', active: flags.bias !== 'neutral', color: flags.bias === 'bearish' ? 'text-rose-400' : 'text-emerald-400' },
-    { key: 'MSS', active: flags.mss, color: 'text-cyan-400' },
     { key: 'Sweep', active: flags.sweep, color: 'text-amber-400' },
     { key: 'FVG', active: flags.fvg, color: 'text-purple-400' },
-    { key: 'OB', active: flags.ob, color: 'text-rose-400' },
   ];
 
   return (

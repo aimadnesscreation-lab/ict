@@ -1,8 +1,11 @@
 import axios from 'axios';
 import type { Signal, Trade, PerformanceMetrics, DemoAccountData, RiskStatus, Candle, HealthStatus } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL ?? '';
-const api = axios.create({ baseURL: API_BASE_URL, timeout: 8000 });
+const api = axios.create({ timeout: 8000 });
+// No baseURL — all requests resolve relative to the current page origin.
+// This works for both:
+//   - Pre-built dashboard served by FastAPI (same origin: port 8000)
+//   - Vite dev server at localhost:5173 (proxied by vite.config.ts)
 
 // ── Fetch helpers ───────────────────────────────────────────────────────
 

@@ -3,7 +3,6 @@ import polars as pl
 from datetime import datetime, timedelta
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
-from ict_engine.order_blocks import OrderBlockDetector
 
 @pytest.fixture
 def mock_candles():
@@ -42,21 +41,3 @@ def test_fvg_detection():
     assert df["fvg_type"][2] == "BULLISH"
     assert df["fvg_top"][2] == 1.4
     assert df["fvg_bottom"][2] == 1.0
-
-def test_order_block_detection():
-    # Setup a scenario where ATR is small and a big move occurs
-    data = {
-        "open":  [1.0, 1.0, 1.0, 0.9, 1.2, 1.5], # 0.9 -> 1.2 is a big move
-        "close": [1.0, 1.0, 1.0, 0.8, 1.2, 1.5],
-        "high":  [1.05, 1.05, 1.05, 0.9, 1.25, 1.55],
-        "low":   [0.95, 0.95, 0.95, 0.75, 1.15, 1.45],
-        "atr":   [0.05] * 6
-    }
-    df = pl.DataFrame(data)
-    detector = OrderBlockDetector(atr_multiplier=2.0, expansion_window=1)
-    df = detector.detect_order_blocks(df)
-    
-    # At index 3, close=0.8, next close=1.2. Move = 0.4. ATR*2 = 0.1.
-    # Expansion! Last candle was bearish (0.9 -> 0.8).
-    # So index 3 should be a Bullish OB.
-    assert df["ob_type"][3] == "BULLISH"

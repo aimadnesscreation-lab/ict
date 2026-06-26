@@ -4,9 +4,7 @@ import { useState, useCallback, useEffect } from 'react';
 
 export interface SignalWeights {
   bias: number;
-  mss: number;
   liquidity_sweep: number;
-  order_block: number;
   fvg: number;
 }
 
@@ -36,10 +34,8 @@ const STORAGE_KEY = 'ict-trading-settings';
 const DEFAULT_SETTINGS: AppSettings = {
   signalWeights: {
     bias: 20,
-    mss: 20,
-    liquidity_sweep: 20,
-    order_block: 15,
-    fvg: 15,
+    liquidity_sweep: 40,
+    fvg: 40,
   },
   risk: {
     max_risk_per_trade_pct: 1.0,
@@ -54,15 +50,22 @@ const DEFAULT_SETTINGS: AppSettings = {
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { ...DEFAULT_SETTINGS, signalWeights: { ...DEFAULT_SETTINGS.signalWeights }, risk: { ...DEFAULT_SETTINGS.risk } };
+    if (!raw) return { ...DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw);
-    // Merge with defaults to handle new keys that may not exist in old saves
+    
+    // Construct weight object carefully to handle removed keys
+    const weights: SignalWeights = {
+        bias: parsed.signalWeights?.bias ?? DEFAULT_SETTINGS.signalWeights.bias,
+        liquidity_sweep: parsed.signalWeights?.liquidity_sweep ?? DEFAULT_SETTINGS.signalWeights.liquidity_sweep,
+        fvg: parsed.signalWeights?.fvg ?? DEFAULT_SETTINGS.signalWeights.fvg,
+    };
+
     return {
-      signalWeights: { ...DEFAULT_SETTINGS.signalWeights, ...parsed.signalWeights },
+      signalWeights: weights,
       risk: { ...DEFAULT_SETTINGS.risk, ...parsed.risk },
     };
   } catch {
-    return { ...DEFAULT_SETTINGS, signalWeights: { ...DEFAULT_SETTINGS.signalWeights }, risk: { ...DEFAULT_SETTINGS.risk } };
+    return { ...DEFAULT_SETTINGS };
   }
 }
 

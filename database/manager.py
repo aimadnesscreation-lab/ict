@@ -86,16 +86,22 @@ class DatabaseManager:
 
     async def save_signal(self, signal_data: Dict):
         async with self.async_session() as session:
+            # Extract details
             details = signal_data.pop('details', {})
-            # Only pass columns that exist on DBSignal — the signal dict from
-            # Combo521Detector contains many extra fields (trigger_price, fvg_top,
-            # sweep_price, gap_pct, etc.) that are not DB columns.
+            
+            # Identify columns that exist on DBSignal
             valid_columns = {
                 "timestamp", "symbol", "signal_type", "score",
                 "bullish_score", "bearish_score", "net_score",
                 "price", "timeframe", "bias", "htf_bias",
                 "htf_aligned", "in_kill_zone",
             }
+            
+            # Any field not in valid_columns and not 'details' should be moved into details
+            for key, value in list(signal_data.items()):
+                if key not in valid_columns:
+                    details[key] = signal_data.pop(key)
+            
             filtered = {k: v for k, v in signal_data.items() if k in valid_columns}
             db_signal = DBSignal(
                 **filtered,

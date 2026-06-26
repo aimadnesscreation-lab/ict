@@ -93,12 +93,12 @@ _orchestrator = TradingOrchestrator(
 )
 
 # ── ICT detectors for HTF bias ───────────────────────────────────────
-_ict_ms = MarketStructure(n=3)
+_ict_ms = MarketStructure(n=2)
 
 # ── Binance data ─────────────────────────────────────────────────────
 SYMBOLS = ["ETHUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m"]
-BUFFER_LIMITS = {"1m": 360, "5m": 288, "15m": 168}
+BUFFER_LIMITS = {"1m": 1000, "5m": 1000, "15m": 500}
 
 _candle_buffers: Dict[str, Dict[str, List[Dict]]] = {}
 _background_tasks: List[asyncio.Task] = []
@@ -344,19 +344,29 @@ async def _binance_fetch_candles(symbol: str, bar: str, limit: int = 288) -> Opt
 
 
 def _resample_5m_to_15m(df: pl.DataFrame) -> pl.DataFrame:
-    idx = df.with_row_index().with_columns((pl.col("index") // 3).alias("_g"))
-    return idx.group_by("_g", maintain_order=True).agg([
-        pl.col("timestamp").first(), pl.col("open").first(),
-        pl.col("high").max(), pl.col("low").min(),
-        pl.col("close").last(), pl.col("volume").sum(),
-    ]).drop("_g").sort("timestamp")
+    """Resample 5m candles to 15m using timestamp-based grouping."""
+    if df.is_empty():
+        return df
+    return df.group_by_dynamic(
+        "timestamp", 
+        every="15m", 
+        closed="left",
+        label="left"
+    ).agg([
+        pl.col("open").first(),
+        pl.col("high").max(),
+        pl.col("low").min(),
+        pl.col("close").last(),
+        pl.col("volume").sum(),
+    ]).sort("timestamp")
 
 
 async def _backfill_buffers():
     """Backfill 5m buffers on startup, resample 15m."""
     global _candle_buffers
     for symbol in SYMBOLS:
-        candles = await _binance_fetch_candles(symbol, "5m", 288)
+        # Fetch 1000 candles to ensure accurate PDH/PDL and HTF metrics
+        candles = await _binance_fetch_candles(symbol, "5m", 1000)
         if candles:
             buf = [{"timestamp": c["timestamp"], "open": c["open"], "high": c["high"],
                     "low": c["low"], "close": c["close"], "volume": c["volume"]}
@@ -537,7 +547,8 @@ async def _crypto_data_worker():
         async def _process_candle_close_rest():
             """Fetch 5m candles via REST, detect close, run orchestrator."""
             nonlocal last_processed_ts
-            candles = await _binance_fetch_candles(symbol, "5m", 288)
+            # Fetch 1000 candles to ensure accurate PDH/PDL and HTF metrics
+            candles = await _binance_fetch_candles(symbol, "5m", 1000)
             if not candles or len(candles) < 2:
                 return
 
@@ -551,8 +562,7 @@ async def _crypto_data_worker():
                 merged = sorted(lookup.values(), key=lambda x: x["timestamp"])
             else:
                 merged = candles[:]
-            _candle_buffers[symbol]["5m"] = merged[-288:]
-
+            _candle_buffers[symbol]["5m"] = merged[-1000:]
             latest_ts = int(candles[-1]["timestamp"].replace(tzinfo=timezone.utc).timestamp() * 1000)
             if symbol not in last_processed_ts:
                 last_processed_ts[symbol] = latest_ts
@@ -600,7 +610,7 @@ async def _crypto_data_worker():
                             merged = sorted(lookup.values(), key=lambda x: x["timestamp"])
                         else:
                             merged = ws_candles[:]
-                        _candle_buffers[symbol]["5m"] = merged[-288:]
+                        _candle_buffers[symbol]["5m"] = merged[-1000:]
 
                         latest_ts = ohlcvs[-1][0]
                         if symbol not in last_processed_ts:
@@ -752,7 +762,7 @@ async def _htf_bias_worker():
 
         _last_processed_1h_ts = latest_ts
         df_htf = pl.DataFrame(candles)
-        new_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+        new_bias = determine_bias_from_ema(df_htf, period=50)
 
         if new_bias == "neutral" and len(candles) >= 8:
             df_swings = _ict_ms.detect_swings(df_htf)
@@ -789,7 +799,7 @@ async def _htf_bias_worker():
                              "low": c[3], "close": c[4], "volume": c[5]}
                             for c in ohlcvs
                         ])
-                        new_bias = determine_bias_from_ema(df_htf, fast=12, slow=26, threshold_pct=0.5)
+                        new_bias = determine_bias_from_ema(df_htf, period=50)
                         if new_bias == "neutral" and len(ohlcvs) >= 8:
                             df_swings = _ict_ms.detect_swings(df_htf)
                             new_bias = determine_bias_from_swings(df_swings)
@@ -954,16 +964,23 @@ async def get_candles(symbol: str, timeframe: str = "1h", limit: int = 100):
         return {"error": f"Unsupported symbol: {symbol}. Only ETHUSDT is available.", "data": []}
 
     try:
-        tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
-        bar = tf_map.get(timeframe, "1H")
-        candles = await _binance_fetch_candles(symbol, bar, limit)
+        # 1. Check if we have this data in our real-time buffers
+        if symbol in _candle_buffers and timeframe in _candle_buffers[symbol]:
+            candles = _candle_buffers[symbol][timeframe][-limit:]
+        else:
+            # 2. Fallback to fresh Binance fetch for untracked timeframes (like 1h)
+            tf_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
+            bar = tf_map.get(timeframe, "1H")
+            candles = await _binance_fetch_candles(symbol, bar, limit)
+
         if not candles:
             return []
+
         return [
             {
                 "id": i + 1, "symbol": symbol,
                 "timeframe": timeframe,
-                "timestamp": c["timestamp"].isoformat()
+                "timestamp": c["timestamp"].isoformat() + "Z"
                 if hasattr(c["timestamp"], "isoformat") else str(c["timestamp"]),
                 "open": c["open"], "high": c["high"],
                 "low": c["low"], "close": c["close"], "volume": c["volume"],
@@ -1045,7 +1062,7 @@ async def get_backtest_data(
         return [
             {
                 "id": i + 1, "symbol": symbol, "timeframe": bar,
-                "timestamp": c["timestamp"].isoformat()
+                "timestamp": c["timestamp"].isoformat() + "Z"
                 if hasattr(c["timestamp"], "isoformat") else str(c["timestamp"]),
                 "open": c["open"], "high": c["high"],
                 "low": c["low"], "close": c["close"], "volume": c["volume"],
@@ -1325,3 +1342,4 @@ if _os.path.isdir(_dashboard_dir) and _os.path.exists(_os.path.join(_dashboard_d
     logger.info(f"Dashboard available at /dashboard — {_dashboard_dir}")
 else:
     logger.info("No dashboard build found — API-only mode (run 'cd dashboard && npm run build' to enable)")
+

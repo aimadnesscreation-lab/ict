@@ -119,10 +119,8 @@ export default function Overview() {
                     </td>
                     <td className="px-6 py-4">
                       <div className="flex gap-1">
-                        {s.meta_data.mss && <ConfluenceDot label="MSS" color="bg-cyan-400" />}
                         {s.meta_data.sweep && <ConfluenceDot label="SWP" color="bg-amber-400" />}
                         {s.meta_data.fvg && <ConfluenceDot label="FVG" color="bg-purple-400" />}
-                        {s.meta_data.ob && <ConfluenceDot label="OB" color="bg-rose-400" />}
                       </div>
                     </td>
                     <td className="px-6 py-4 text-slate-500 text-xs whitespace-nowrap">{formatTimeAgo(s.timestamp)}</td>

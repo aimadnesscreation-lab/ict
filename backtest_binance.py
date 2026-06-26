@@ -45,7 +45,6 @@ MAX_OPEN_POSITIONS = 3
 _ict_ms = MarketStructure(n=2)  # Combo 521: swing_lookback=2
 _ict_fvg = FVGDetector()
 _ict_liquidity = LiquidityDetector(atr_threshold=0.10)
-_ict_sessions = SessionDetector()
 _ict_pd = PremiumDiscountDetector()
 _combo521 = Combo521Detector(
     swing_lookback=2,
@@ -150,7 +149,6 @@ def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
     df = _ict_ms.detect_swings(df)
     df = _ict_fvg.detect_fvgs(df)
     df = _ict_liquidity.detect_all(df)
-    df = _ict_sessions.detect_sessions(df)
     df = _ict_pd.compute_zones(df)
     return df
 
