@@ -17,6 +17,7 @@ Usage:
 """
 
 import os
+import asyncio
 import ccxt.pro as ccxt
 from loguru import logger
 from typing import Dict, List, Optional, Tuple
@@ -135,6 +136,32 @@ class LiveExecutor:
         min_amt = amt_limits.get('min', 0.0001)
         max_amt = amt_limits.get('max', 1000.0)
         return (amount_prec, min_amt, max_amt)
+
+    def _get_price_tick(self, symbol: str) -> float:
+        """Get the price tick size for a symbol from loaded market data.
+
+        Returns the minimum price increment (e.g. 0.01 for ETHUSDT).
+        Falls back to 0.01 if markets not loaded.
+        """
+        if not self.exchange or not self._markets_loaded:
+            return 0.01
+        market_symbol = normalize_symbol(symbol)
+        market = self.exchange.markets.get(market_symbol)
+        if not market:
+            return 0.01
+        precision = market.get('precision', {})
+        return precision.get('price', 0.01)
+
+    def _round_price(self, symbol: str, price: float) -> float:
+        """Round a price to the nearest valid tick size for the symbol.
+
+        Binance rejects orders with prices that don't match the tick size
+        (e.g. ETHUSDT tick = 0.01, so 1845.234 becomes 1845.23).
+        """
+        tick = self._get_price_tick(symbol)
+        if tick <= 0:
+            return round(price, 2)
+        return round(price / tick) * tick
 
     def _round_amount(self, symbol: str, amount: float) -> Optional[float]:
         """Round amount to the symbol's precision and validate it's within limits.
@@ -393,6 +420,17 @@ class LiveExecutor:
                 f"  Entry filled: {filled} @ {avg_entry} (requested {amount})"
             )
 
+            # Round SL/TP prices to exchange tick size — Binance rejects orders
+            # with invalid price precision (e.g. 1820.345 when tick=0.01).
+            # This was the root cause of missing SL/TP on live positions.
+            rounded_sl = self._round_price(symbol, sl)
+            rounded_tp = self._round_price(symbol, tp)
+
+            # Brief delay to let the exchange register the position before
+            # placing reduce-only orders (prevents "reduce-only order rejected"
+            # errors when the market entry hasn't fully settled).
+            await asyncio.sleep(1)
+
             # 3. STOP_MARKET — stop-loss (reduce-only)
             # One-way mode: side alone determines direction, no positionSide needed
             try:
@@ -402,17 +440,16 @@ class LiveExecutor:
                     side=opposite_side,
                     amount=filled,
                     params={
-                        'stopPrice': sl,
+                        'stopPrice': rounded_sl,
                         'reduceOnly': True,
                         'workingType': 'MARK_PRICE',
                     }
                 )
-                logger.info(f"  SL order placed: STOP_MARKET {opposite_side} @ {sl}")
+                logger.info(f"  SL order placed: STOP_MARKET {opposite_side} @ {rounded_sl}")
             except Exception as e:
                 logger.warning(f"  SL order failed: {e}")
 
             # 4. TAKE_PROFIT_MARKET — take-profit (reduce-only)
-            # One-way mode: side alone determines direction, no positionSide needed
             try:
                 await self.exchange.create_order(
                     symbol=market_symbol,
@@ -420,18 +457,18 @@ class LiveExecutor:
                     side=opposite_side,
                     amount=filled,
                     params={
-                        'stopPrice': tp,
+                        'stopPrice': rounded_tp,
                         'reduceOnly': True,
                         'workingType': 'MARK_PRICE',
                     }
                 )
-                logger.info(f"  TP order placed: TAKE_PROFIT_MARKET {opposite_side} @ {tp}")
+                logger.info(f"  TP order placed: TAKE_PROFIT_MARKET {opposite_side} @ {rounded_tp}")
             except Exception as e:
                 logger.warning(f"  TP order failed: {e}")
 
             logger.info(
                 f"Execution: {side} {market_symbol} entry={avg_entry:.2f} "
-                f"SL={sl:.2f} TP={tp:.2f} qty={filled}"
+                f"SL={rounded_sl:.2f} TP={rounded_tp:.2f} qty={filled}"
             )
             return entry
 
