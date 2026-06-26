@@ -7,8 +7,9 @@ full trade history + performance metrics.
 
 Rules:
   - 1% risk per trade (of current account balance)
-  - 1:2 risk-reward (SL = 1× ATR, TP = 2× ATR)
-  - Only trades signals with score ≥ 70 AND inside a kill zone (matches Discord alerts)
+  - 1:3 risk-reward (SL = 1× ATR, TP = 3× ATR) — configurable via tp_ratio
+  - Trades signals that pass per-symbol min_score threshold (symbol_min_scores)
+    or all signals from Combo 521 (which sets score=100 internally, bypassing scoring)
   - Long on BUY/STRONG_BUY, Short on SELL/STRONG_SELL
   - Max 1 open position per symbol (ignores weaker signals if already in)
   - Account starts at $5,000
@@ -361,16 +362,16 @@ class DemoAccount:
 
     def _open_trade(self, symbol: str, signal_type: str, side: str,
                     price: float, atr_value: float, timestamp, score: int = 0) -> Optional[OpenPosition]:
-        """Open a new position with 1% risk, 1:2 RR.
+        """Open a new position with 1% risk, tp_ratio RR (default 1:3).
 
         Three modes:
           1. Fixed percentage (if fixed_sl_pct > 0):
-             SL = fixed_sl_pct% from entry, TP = 2 × SL distance
-             e.g. fixed_sl_pct=1.0 → SL 1% away, TP 2% away
+             SL = fixed_sl_pct% from entry, TP = tp_ratio × SL distance
+             e.g. fixed_sl_pct=1.0 → SL 1% away, TP 3% away (with tp_ratio=3)
           2. ATR-based (default):
              Uses per-symbol multiplier from symbol_sl_multipliers if available,
              otherwise falls back to the default sl_multiplier.
-             SL = multiplier × ATR, TP = 2 × SL distance
+             SL = multiplier × ATR, TP = tp_ratio × SL distance
           3. Tiered sizing (if tiered_sizing is True):
              Scales risk based on signal score:
                score < 70: 0.5x base risk
@@ -442,7 +443,10 @@ class DemoAccount:
                 "risk_amount": pos.risk_amount,
                 "atr": pos.atr
             }
-            asyncio.ensure_future(self.db.save_position(db_pos))
+            _pending_db = asyncio.ensure_future(self.db.save_position(db_pos))
+            _pending_db.add_done_callback(
+                lambda f: logger.error(f"DB save_position failed: {f.exception()}") if f.exception() else None
+            )
 
         return pos
 
@@ -541,8 +545,14 @@ class DemoAccount:
                 "result": trade.result,
                 "exit_reason": trade.exit_reason
             }
-            asyncio.ensure_future(self.db.save_trade(db_trade))
-            asyncio.ensure_future(self.db.remove_position(pos.symbol))
+            _pending_save = asyncio.ensure_future(self.db.save_trade(db_trade))
+            _pending_save.add_done_callback(
+                lambda f: logger.error(f"DB save_trade failed: {f.exception()}") if f.exception() else None
+            )
+            _pending_rm = asyncio.ensure_future(self.db.remove_position(pos.symbol))
+            _pending_rm.add_done_callback(
+                lambda f: logger.error(f"DB remove_position failed: {f.exception()}") if f.exception() else None
+            )
 
         # Remove from open positions
         del self.open_positions[pos.symbol]

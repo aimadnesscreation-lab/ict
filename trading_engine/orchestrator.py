@@ -161,8 +161,9 @@ class TradingOrchestrator:
                     if has_pos:
                         logger.info(f"[Orch][{sym}] Position already on exchange, skipping mirror")
                         continue
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"[Orch][{sym}] has_position() failed: {e} — proceeding to place order anyway")
+
 
                 try:
                     await self.executor.place_order(

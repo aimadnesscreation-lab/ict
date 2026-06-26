@@ -8,7 +8,7 @@ A production-grade algorithmic trading platform built on **ICT (Inner Circle Tra
 
 - **Real-Time Data Ingestion:** Powered by **CCXT Pro WebSockets**. Zero-latency ticker and candle updates ensure entries are triggered the millisecond a candle closes.
 - **Binance USDⓈ-M Futures:** Supports both **LONG and SHORT** positions with 3× leverage, stop-market SL/TP orders, and one-way position mode.
-- **Dual-Scoring Signal Engine:** Tracks bullish and bearish confluences independently (not a single ambiguous score) — net difference determines signal direction.
+- **Combo 521 Pattern Detection:** Uses sweep+FVG pattern detection on 5m candles (proximal edge entry, PD zone filter). Skips the dual-scoring engine — every valid pattern becomes a signal (score=100) passed directly to DemoAccount.
 - **Persistent State Management:** Integrated **SQLite + SQLAlchemy** (async) database. Every trade, signal, and balance change is persisted locally in `trading.db`.
 - **Auto-Recovery:** The system automatically restores its state (balance, open positions, history) from the database on startup, surviving server restarts.
 - **WebSocket HTF Bias:** Real-time 1H trend detection via EMA12/EMA26 crossovers with 0.5% threshold. Falls back to swing structure analysis for neutral EMA readings.
@@ -160,9 +160,9 @@ Binance Futures WebSockets (Real-time via CCXT Pro)
 
 Unified entry point that coordinates the entire pipeline:
 
-1. Runs ICT pipeline on both **5m and 15m** data
-2. Generates signals via **dual-scoring** engine (bullish vs. bearish independently)
-3. **HTF alignment filter** — signals must align with **Real-time WebSocket 1h EMA bias** (neutral bias lets all signals pass)
+1. Runs ICT pipeline on **5m** data (swings, FVG, liquidity sweeps, PD zones)
+2. Detects **Combo 521** sweep+FVG patterns (bypasses dual-scoring — every pattern becomes a signal with score=100)
+3. Signals are passed directly to DemoAccount (HTF alignment filter is not used on the Combo 521 path)
 4. **Futures mode** — both LONG and SHORT signals are supported
 5. Feeds qualifying signals to DemoAccount (requires: score ≥ min_score AND in kill zone AND HTF aligned)
 6. Mirrors newly opened positions to **Binance Futures** via LiveExecutor (LONG → buy, SHORT → sell)
@@ -182,7 +182,7 @@ Unified entry point that coordinates the entire pipeline:
 | Starting capital | $5,000 | $5,000 (`--capital`) |
 | Risk per trade | 1.0% of balance | 1.0% |
 | Stop-loss distance | **2.0× ATR** | **2.0× ATR** (`--sl-multiplier`) |
-| Take-profit distance | 1:2 RR (2× SL distance) | 1:2 RR |
+| Take-profit distance | **1:3 RR** (3× SL distance, `tp_ratio=3.0`) | 1:3 RR (3R TP) |
 | Max open positions | 3 | 3 |
 | Max daily loss | 3.0% of initial balance | 3.0% |
 | Re-entry cooldown after SL | 0 min (none) | 0 min |
