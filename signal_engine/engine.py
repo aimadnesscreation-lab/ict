@@ -1,7 +1,4 @@
 import polars as pl
-from typing import Dict, List, Optional
-from ict_engine.sessions import SessionDetector
-from ict_engine.premium_discount import PremiumDiscountDetector
 
 
 def determine_bias_from_swings(df: pl.DataFrame) -> str:

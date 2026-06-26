@@ -16,7 +16,7 @@ OTE Zones (Fibonacci retracements of the dealing range):
 """
 
 import polars as pl
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 
 class PremiumDiscountDetector:
@@ -110,34 +110,4 @@ class PremiumDiscountDetector:
             in_discount.alias("in_discount"),
         ])
 
-    def get_score_contribution(self, df: pl.DataFrame, trend_bias: str) -> Dict[str, int]:
-        """
-        Calculate confluence score from premium/discount/OTE analysis.
 
-        Returns dict with keys:
-          - discount_score: +10 if in discount zone
-          - ote_score: +10 if in OTE zone
-          - total: sum of both
-        """
-        if "zone" not in df.columns:
-            df = self.compute_zones(df)
-
-        latest = df.tail(1).to_dicts()[0]
-        score = {"discount_score": 0, "ote_score": 0}
-
-        # Discount zone = +10 (price at a value area)
-        in_discount = latest.get("in_discount", False)
-        in_ote = latest.get("in_ote", False)
-
-        # Score depends on alignment with trend bias
-        if trend_bias == "bullish" and in_discount:
-            score["discount_score"] = 10
-        elif trend_bias == "bearish" and not in_discount:
-            # Bearish trend prefers premium zone (selling high)
-            score["discount_score"] = 10
-
-        if in_ote:
-            score["ote_score"] = 10
-
-        score["total"] = score["discount_score"] + score["ote_score"]
-        return score

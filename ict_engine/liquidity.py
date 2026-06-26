@@ -1,5 +1,5 @@
 import polars as pl
-from typing import Optional
+
 
 class LiquidityDetector:
     """
@@ -9,14 +9,6 @@ class LiquidityDetector:
 
     def __init__(self, atr_threshold: float = 0.10):
         self.atr_threshold = atr_threshold
-        self.atr_series: Optional[pl.Series] = None
-
-    def _ensure_atr(self, df: pl.DataFrame) -> pl.DataFrame:
-        """Calculate ATR if not already present and add it to the DataFrame."""
-        if "atr" not in df.columns:
-            from .utils import calculate_atr
-            df = df.with_columns(calculate_atr(df).alias("atr"))
-        return df
 
     def detect_liquidity_sweeps(self, df: pl.DataFrame) -> pl.DataFrame:
         """

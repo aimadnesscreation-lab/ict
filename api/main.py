@@ -97,9 +97,6 @@ _ict_ms = MarketStructure(n=2)
 
 # ── Binance data ─────────────────────────────────────────────────────
 SYMBOLS = ["ETHUSDT", "SOLUSDT"]
-TIMEFRAMES = ["1m", "5m", "15m"]
-BUFFER_LIMITS = {"1m": 1000, "5m": 1000, "15m": 500}
-
 _candle_buffers: Dict[str, Dict[str, List[Dict]]] = {}
 _background_tasks: List[asyncio.Task] = []
 
@@ -118,7 +115,6 @@ _latest_ticks: Dict[str, Dict] = {
         "timestamp": _NOW.isoformat().replace("+00:00", "Z"),
     },
 }
-DEFAULT_PRECISION = 2
 
 # ── WebSocket broadcast manager ────────────────────────────────────────
 _ws_clients: set[WebSocket] = set()

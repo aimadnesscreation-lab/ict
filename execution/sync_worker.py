@@ -21,7 +21,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -312,89 +311,3 @@ async def sync_positions(
 
     return result
 
-
-# ── Background Worker ─────────────────────────────────────────────────
-
-async def sync_worker(
-    demo_account: DemoAccount,
-    live_executor: LiveExecutor,
-    latest_prices: Dict[str, float],
-    health_dict: Dict,
-    interval: int = SYNC_INTERVAL_SECONDS,
-):
-    """
-    Background worker that periodically reconciles DemoAccount with exchange positions.
-    Runs every `interval` seconds alongside the crypto data and HTF bias workers.
-
-    Args:
-        demo_account: The in-memory DemoAccount instance
-        live_executor: The LiveExecutor connected to Binance
-        latest_prices: Dict of {symbol: current_price}
-        health_dict: Shared health dict for monitoring sync stats
-        interval: Seconds between sync cycles
-    """
-    logger.info(f"[Sync] Worker started (interval={interval}s)")
-
-    # Track total sync stats in health dict
-    health_dict["sync_stats"] = {
-        "total_cycles": 0,
-        "total_closed_from_sl": 0,
-        "total_closed_from_tp": 0,
-        "total_closed_from_manual": 0,
-        "total_errors": 0,
-        "last_sync_time": None,
-        "last_sync_result": None,
-    }
-
-    while True:
-        try:
-            await asyncio.sleep(interval)
-
-            # Skip if no exchange
-            if not live_executor or not live_executor.exchange:
-                continue
-
-            # Run sync
-            result = await sync_positions(
-                demo_account=demo_account,
-                live_executor=live_executor,
-                latest_prices=latest_prices,
-            )
-
-            # Update health stats
-            stats = health_dict.get("sync_stats", {})
-            stats["total_cycles"] = stats.get("total_cycles", 0) + 1
-            stats["total_closed_from_sl"] += result.positions_closed_from_exchange_sl
-            stats["total_closed_from_tp"] += result.positions_closed_from_exchange_tp
-            stats["total_closed_from_manual"] += result.positions_closed_from_exchange_manual
-            stats["total_errors"] += len(result.errors)
-            stats["last_sync_time"] = result.timestamp.isoformat().replace("+00:00", "Z")
-            stats["last_sync_result"] = {
-                "demo_positions": result.demo_positions_checked,
-                "exchange_positions": result.exchange_positions_checked,
-                "closed_sl": result.positions_closed_from_exchange_sl,
-                "closed_tp": result.positions_closed_from_exchange_tp,
-                "closed_manual": result.positions_closed_from_exchange_manual,
-                "discrepancies": len(result.discrepancies),
-                "errors": len(result.errors),
-            }
-
-            # Log summary
-            total_closed = (result.positions_closed_from_exchange_sl +
-                           result.positions_closed_from_exchange_tp +
-                           result.positions_closed_from_exchange_manual)
-            if total_closed > 0 or len(result.discrepancies) > 0:
-                logger.info(
-                    f"[Sync] Cycle complete: {result.demo_positions_checked} demo positions checked, "
-                    f"{result.exchange_positions_checked} exchange positions, "
-                    f"{total_closed} closed via sync, "
-                    f"{len(result.discrepancies)} discrepancies"
-                )
-
-        except asyncio.CancelledError:
-            logger.info("[Sync] Worker cancelled.")
-            break
-        except Exception as e:
-            logger.error(f"[Sync] Worker error: {e}")
-            stats = health_dict.get("sync_stats", {})
-            stats["total_errors"] = stats.get("total_errors", 0) + 1

@@ -28,11 +28,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.liquidity import LiquidityDetector
-from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.utils import calculate_atr
 from signal_engine.combo521 import Combo521Detector
-from signal_engine.combo521_mtf import Combo521MTFDetector
 from demo_account import DemoAccount, ClosedTrade
 import json
 
@@ -55,41 +53,6 @@ _combo521 = Combo521Detector(
     entry_mode="proximal",
     kill_zone_only=False,
 )
-_combo521_mtf = Combo521MTFDetector(
-    max_1h_bars_after_sweep=12,
-    max_5m_bars_after_sweep=48,
-    min_gap_pct=0.05,
-    kill_zone_only=False,
-)
-
-
-def precompute_ict_1h(df: pl.DataFrame) -> pl.DataFrame:
-    """Run ICT pipeline for 1H data (only needs swings + sweeps, no FVG needed)."""
-    df = df.clone()
-    df = _ict_ms.detect_swings(df)
-    df = _ict_liquidity.detect_all(df)
-    return df
-
-
-def extract_mtf_signal(df_ict_5m: pl.DataFrame, df_ict_1h: pl.DataFrame,
-                        candle_idx: int, symbol: str = "ETHUSDT",
-                        current_price: Optional[float] = None) -> Optional[Dict]:
-    """Detect MTF signals using 1H sweeps + 5m FVGs."""
-    if candle_idx < 50:
-        return None
-
-    signals = _combo521_mtf.detect(df_ict_5m, df_ict_1h, current_idx_5m=candle_idx, symbol=symbol)
-    if not signals:
-        return None
-
-    sig = signals[0]
-    sig["id"] = None
-
-    if current_price is not None and current_price > 0:
-        sig["trigger_price"] = sig["price"]
-        sig["price"] = current_price
-
-    return sig
 
 
 async def fetch_historical_data(symbol: str, bar: str, days: int,
@@ -292,8 +255,7 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                           risk_pct: float = 1.0,
                           sl_slippage_pct: float = 0.05,
                           tp_slippage_pct: float = 0.02,
-                          next_candle_entry: bool = True,
-                          mtf: bool = False) -> Dict:
+                          next_candle_entry: bool = True) -> Dict:
     """Run 30-day backtest using Combo 521 strategy + DemoAccount.
 
     No HTF bias, no scoring, no kill zone requirements — pure
@@ -343,25 +305,12 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     current_trade_start: Dict[str, Dict] = {}
     _pending_signal: Optional[Dict] = None  # Next-candle entry: signal stored here, executed next iteration
 
-    # Pre-compute ICT columns on 5m
+    # Pre-compute ICT columns once
     logger.info(f"    Pre-computing ICT columns (swing_lookback=2)...")
     t_ict = datetime.now(timezone.utc)
     df_ict = precompute_ict(df_5m_full)
     ict_elapsed = (datetime.now(timezone.utc) - t_ict).total_seconds()
     logger.info(f"    ICT pre-compute: {ict_elapsed:.1f}s for {len(df_ict)} rows")
-
-    # If MTF mode, fetch 1H data and precompute ICT on it
-    df_1h_ict = None
-    if mtf:
-        logger.info(f"    Fetching 1H data for MTF mode...")
-        df_1h_full = await fetch_historical_data(symbol, "1H", days + 2, before=before)
-        if not df_1h_full.is_empty() and len(df_1h_full) > 20:
-            logger.info(f"    Pre-computing 1H ICT columns...")
-            df_1h_ict = precompute_ict_1h(df_1h_full)
-            logger.info(f"    1H ICT pre-compute: {len(df_1h_ict)} 1H rows")
-        else:
-            logger.warning(f"    Not enough 1H data for MTF, falling back to 5m-only")
-            mtf = False
 
     warmup = 30  # need enough data for 20-bar lookback + safety margin
     i = warmup
@@ -438,11 +387,8 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                     if debug and sym in current_trade_start:
                         del current_trade_start[sym]
 
-            # Step 2: Detect signal (MTF or standard Combo 521)
-            if mtf and df_1h_ict is not None:
-                sig = extract_mtf_signal(df_ict, df_1h_ict, candle_idx, symbol=symbol, current_price=current_price)
-            else:
-                sig = extract_combo521_signal(df_ict, candle_idx, symbol=symbol, current_price=current_price)
+            # Step 2: Detect Combo 521 signal
+            sig = extract_combo521_signal(df_ict, candle_idx, symbol=symbol, current_price=current_price)
             if sig is not None:
                 sig["timestamp"] = current_ts
                 signals_gen += 1
@@ -741,25 +687,17 @@ async def main():
                         help="Risk per trade %% of balance (default 1.0)")
     parser.add_argument("--kill-zone-only", action="store_true",
                         help="Only trade during London (07-09 UTC) and NY (13-15 UTC) kill zones")
-    parser.add_argument("--mtf", action="store_true",
-                        help="Enable multi-timeframe mode: 1H sweeps + 5m FVGs")
     parser.add_argument("--compound", action="store_true",
                         help="Compound capital across months (don't reset to initial each month)")
     args = parser.parse_args()
 
     # Rebuild Combo521 detector with custom params
-    global _combo521, _combo521_mtf
+    global _combo521
     _combo521 = Combo521Detector(
         swing_lookback=2,
         max_bars_after_sweep=args.max_bars,
         min_gap_pct=args.min_gap_pct,
         entry_mode="proximal",
-        kill_zone_only=args.kill_zone_only,
-    )
-    _combo521_mtf = Combo521MTFDetector(
-        max_1h_bars_after_sweep=12,
-        max_5m_bars_after_sweep=48,
-        min_gap_pct=args.min_gap_pct,
         kill_zone_only=args.kill_zone_only,
     )
 
@@ -791,10 +729,7 @@ async def main():
     symbols = [args.symbol.upper()] if args.symbol else SYMBOLS
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | {args.risk_pct}% risk | 3R TP | 5m entries")
     print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown")
-    if args.mtf:
-        print(f"  Strategy: Combo 521 MTF (1H sweep + 5m FVG, proximal entry, PD zone filter)")
-    else:
-        print(f"  Strategy: Combo 521 (5m sweep+FVG, proximal entry, PD zone filter)")
+    print(f"  Strategy: Combo 521 (5m sweep+FVG, proximal entry, PD zone filter)")
     if args.kill_zone_only:
         print(f"  Kill Zone filter: Enabled (London 07-09 / NY 13-15 UTC only)")
     print(f"  Symbols: {', '.join(symbols)}")
@@ -828,18 +763,17 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry, mtf=args.mtf) for sym in symbols]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
             for sym in symbols:
-                r = await backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry, mtf=args.mtf)
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry)
                 results.append(r)
                 print()
 
         r1, r2 = results[0], results[1] if len(results) > 1 else None
 
-        labels = {s.upper(): s.upper() for s in symbols}
         dr_parts = {}
         for r in results:
             sym = r["symbol"]

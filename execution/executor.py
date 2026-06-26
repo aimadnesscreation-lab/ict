@@ -27,8 +27,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-TRACKED_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-
 DEFAULT_LEVERAGE = 3  # Default leverage for futures positions
 
 
