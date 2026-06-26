@@ -21,6 +21,7 @@ from ict_engine.market_structure import MarketStructure
 from ict_engine.fvg import FVGDetector
 from ict_engine.liquidity import LiquidityDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
+from ict_engine.utils import calculate_atr
 from signal_engine.combo521 import Combo521Detector
 from demo_account import DemoAccount
 from execution.executor import LiveExecutor
@@ -114,6 +115,8 @@ class TradingOrchestrator:
         df = self.ict_fvg.detect_fvgs(df)
         df = self.ict_liquidity.detect_all(df)
         df = self.ict_pd.compute_zones(df)
+        # ATR needed by Combo 521 for stop-loss distance calculation
+        df = df.with_columns(calculate_atr(df).alias("atr"))
 
         # ── Detect Combo 521 patterns ────────────────────────────────
         current_idx = len(df) - 1  # the just-closed candle is the last row

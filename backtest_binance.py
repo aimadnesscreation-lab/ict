@@ -30,6 +30,7 @@ from ict_engine.fvg import FVGDetector
 from ict_engine.liquidity import LiquidityDetector
 from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
+from ict_engine.utils import calculate_atr
 from signal_engine.combo521 import Combo521Detector
 from demo_account import DemoAccount, ClosedTrade
 import json
@@ -150,6 +151,8 @@ def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
     df = _ict_fvg.detect_fvgs(df)
     df = _ict_liquidity.detect_all(df)
     df = _ict_pd.compute_zones(df)
+    # ATR needed by Combo 521 for stop-loss distance calculation
+    df = df.with_columns(calculate_atr(df).alias("atr"))
     return df
 
 
