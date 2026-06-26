@@ -32,6 +32,7 @@ from ict_engine.sessions import SessionDetector
 from ict_engine.premium_discount import PremiumDiscountDetector
 from ict_engine.utils import calculate_atr
 from signal_engine.combo521 import Combo521Detector
+from signal_engine.combo521_mtf import Combo521MTFDetector
 from demo_account import DemoAccount, ClosedTrade
 import json
 
@@ -52,7 +53,43 @@ _combo521 = Combo521Detector(
     max_bars_after_sweep=20,
     min_gap_pct=0.05,
     entry_mode="proximal",
+    kill_zone_only=False,
 )
+_combo521_mtf = Combo521MTFDetector(
+    max_1h_bars_after_sweep=12,
+    max_5m_bars_after_sweep=48,
+    min_gap_pct=0.05,
+    kill_zone_only=False,
+)
+
+
+def precompute_ict_1h(df: pl.DataFrame) -> pl.DataFrame:
+    """Run ICT pipeline for 1H data (only needs swings + sweeps, no FVG needed)."""
+    df = df.clone()
+    df = _ict_ms.detect_swings(df)
+    df = _ict_liquidity.detect_all(df)
+    return df
+
+
+def extract_mtf_signal(df_ict_5m: pl.DataFrame, df_ict_1h: pl.DataFrame,
+                        candle_idx: int, symbol: str = "ETHUSDT",
+                        current_price: Optional[float] = None) -> Optional[Dict]:
+    """Detect MTF signals using 1H sweeps + 5m FVGs."""
+    if candle_idx < 50:
+        return None
+
+    signals = _combo521_mtf.detect(df_ict_5m, df_ict_1h, current_idx_5m=candle_idx, symbol=symbol)
+    if not signals:
+        return None
+
+    sig = signals[0]
+    sig["id"] = None
+
+    if current_price is not None and current_price > 0:
+        sig["trigger_price"] = sig["price"]
+        sig["price"] = current_price
+
+    return sig
 
 
 async def fetch_historical_data(symbol: str, bar: str, days: int,
@@ -251,8 +288,12 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                           before: Optional[str] = None,
                           debug: bool = False,
                           fee_pct: float = 0.0,
-                          sl_multiplier: float = 1.5,
-                          risk_pct: float = 1.0) -> Dict:
+                          sl_multiplier: float = 3.0,
+                          risk_pct: float = 1.0,
+                          sl_slippage_pct: float = 0.05,
+                          tp_slippage_pct: float = 0.02,
+                          next_candle_entry: bool = True,
+                          mtf: bool = False) -> Dict:
     """Run 30-day backtest using Combo 521 strategy + DemoAccount.
 
     No HTF bias, no scoring, no kill zone requirements — pure
@@ -263,9 +304,12 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
         chunk_size: Candles per processing chunk
         before: ISO date to end the 30-day window (default: now)
         debug: Enable per-trade debug logging and analysis
-        fee_pct: Round-trip fee %% (default 0.0)
-        sl_multiplier: ATR multiplier for SL (default 1.5, matches Combo 521)
+        fee_pct: Round-trip fee %% (default 0.10)
+        sl_multiplier: ATR multiplier for SL (default 3.0, reduces loss severity per 5-yr optimizer)
         risk_pct: Risk per trade as %% of balance (default 1.0)
+        sl_slippage_pct: SL exit slippage %% (default 0.05)
+        tp_slippage_pct: TP exit slippage %% (default 0.02)
+        next_candle_entry: If True, defer entry by 1 candle and use next candle's open (default True)
     """
     days = 30
 
@@ -297,13 +341,27 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
     signals_gen = 0
     trade_log: List[Dict] = []
     current_trade_start: Dict[str, Dict] = {}
+    _pending_signal: Optional[Dict] = None  # Next-candle entry: signal stored here, executed next iteration
 
-    # Pre-compute ICT columns once
+    # Pre-compute ICT columns on 5m
     logger.info(f"    Pre-computing ICT columns (swing_lookback=2)...")
     t_ict = datetime.now(timezone.utc)
     df_ict = precompute_ict(df_5m_full)
     ict_elapsed = (datetime.now(timezone.utc) - t_ict).total_seconds()
     logger.info(f"    ICT pre-compute: {ict_elapsed:.1f}s for {len(df_ict)} rows")
+
+    # If MTF mode, fetch 1H data and precompute ICT on it
+    df_1h_ict = None
+    if mtf:
+        logger.info(f"    Fetching 1H data for MTF mode...")
+        df_1h_full = await fetch_historical_data(symbol, "1H", days + 2, before=before)
+        if not df_1h_full.is_empty() and len(df_1h_full) > 20:
+            logger.info(f"    Pre-computing 1H ICT columns...")
+            df_1h_ict = precompute_ict_1h(df_1h_full)
+            logger.info(f"    1H ICT pre-compute: {len(df_1h_ict)} 1H rows")
+        else:
+            logger.warning(f"    Not enough 1H data for MTF, falling back to 5m-only")
+            mtf = False
 
     warmup = 30  # need enough data for 20-bar lookback + safety margin
     i = warmup
@@ -317,6 +375,22 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
             current_ts = current["timestamp"]
             candle_idx = i + j
 
+            # Step 0: Process pending signal from previous candle (next-candle-open entry)
+            # Models: signal fires at candle close → market order → fills at next candle's open
+            if next_candle_entry and _pending_signal is not None:
+                next_open = current["open"]
+                _pending_signal["price"] = next_open
+                _pending_signal["trigger_price"] = next_open
+                _pending_signal["timestamp"] = current_ts
+
+                prev_positions = set(demo.open_positions.keys())
+                demo.process_signals([_pending_signal], {symbol: next_open}, current_time=current_ts)
+                if debug:
+                    for sym in demo.open_positions.keys():
+                        if sym not in prev_positions:
+                            current_trade_start[sym] = {"candle_idx": candle_idx, "entry_ts": current_ts}
+                _pending_signal = None
+
             # Step 1: Check open positions against candle H/L
             for sym in list(demo.open_positions.keys()):
                 if sym != symbol:
@@ -324,6 +398,19 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                 pos = demo.open_positions[sym]
                 reason, price = check_position_vs_candle(pos, current["high"], current["low"], current_ts)
                 if reason is not None:
+                    # Apply slippage to exit price
+                    if sl_slippage_pct > 0 or tp_slippage_pct > 0:
+                        if reason == "STOP_LOSS" and sl_slippage_pct > 0:
+                            if pos.side == "LONG":
+                                price = price * (1 - sl_slippage_pct / 100)
+                            else:
+                                price = price * (1 + sl_slippage_pct / 100)
+                        elif reason == "TAKE_PROFIT" and tp_slippage_pct > 0:
+                            if pos.side == "LONG":
+                                price = price * (1 - tp_slippage_pct / 100)
+                            else:
+                                price = price * (1 + tp_slippage_pct / 100)
+
                     if debug and sym in current_trade_start:
                         held = candle_idx - current_trade_start[sym].get("candle_idx", candle_idx)
                         trade_log.append({
@@ -351,20 +438,26 @@ async def backtest_symbol(symbol: str, chunk_size: int = 500,
                     if debug and sym in current_trade_start:
                         del current_trade_start[sym]
 
-            # Step 2: Detect Combo 521 signal
-            sig = extract_combo521_signal(df_ict, candle_idx, symbol=symbol, current_price=current_price)
+            # Step 2: Detect signal (MTF or standard Combo 521)
+            if mtf and df_1h_ict is not None:
+                sig = extract_mtf_signal(df_ict, df_1h_ict, candle_idx, symbol=symbol, current_price=current_price)
+            else:
+                sig = extract_combo521_signal(df_ict, candle_idx, symbol=symbol, current_price=current_price)
             if sig is not None:
                 sig["timestamp"] = current_ts
                 signals_gen += 1
 
-            # Step 3: Feed to DemoAccount
-            aligned = [sig] if sig else []
-            prev_positions = set(demo.open_positions.keys())
-            demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
-            if debug:
-                for sym in demo.open_positions.keys():
-                    if sym not in prev_positions:
-                        current_trade_start[sym] = {"candle_idx": candle_idx, "entry_ts": current_ts}
+            # Step 3: Store signal as pending (next-candle entry) or execute immediately
+            if next_candle_entry:
+                _pending_signal = sig
+            else:
+                aligned = [sig] if sig else []
+                prev_positions = set(demo.open_positions.keys())
+                demo.process_signals(aligned, {symbol: current_price}, current_time=current_ts)
+                if debug:
+                    for sym in demo.open_positions.keys():
+                        if sym not in prev_positions:
+                            current_trade_start[sym] = {"candle_idx": candle_idx, "entry_ts": current_ts}
 
         i = chunk_end
 
@@ -623,19 +716,52 @@ async def main():
                         help="Run symbols per month in parallel")
     parser.add_argument("--capital", type=float, default=None,
                         help="Starting capital (default: 5000)")
+    parser.add_argument("--sl-slippage-pct", type=float, default=0.05,
+                        help="SL exit slippage %% (default 0.05)")
+    parser.add_argument("--tp-slippage-pct", type=float, default=0.02,
+                        help="TP exit slippage %% (default 0.02)")
+    parser.add_argument("--no-next-candle-entry", action="store_true",
+                        help="Disable next-candle-open deferral — use immediate FVG edge entry (legacy mode)")
+    parser.add_argument("--max-bars", type=int, default=20,
+                        help="Max bars after sweep for Combo 521 (default 20)")
+    parser.add_argument("--min-gap-pct", type=float, default=0.05,
+                        help="Min FVG gap %% for Combo 521 (default 0.05)")
     parser.add_argument("--symbol", type=str, default=None,
                         help="Symbol to backtest (default: ETHUSDT)")
     parser.add_argument("--debug", action="store_true",
                         help="Enable detailed per-trade debug analysis")
     parser.add_argument("--fee-pct", type=float, default=0.06,
-                        help="Round-trip trading fee %% (default 0.06: 0.02%% maker entry + 0.04%% taker exit)")
-    parser.add_argument("--sl-multiplier", type=float, default=1.5,
-                        help="ATR multiplier for SL (default 1.5, matches Combo 521)")
+                        help="Round-trip trading fee %% (default 0.06: 0.02%% maker entry + 0.04%% taker exit — winning config)")
+    parser.add_argument("--sl-multiplier", type=float, default=3.0,
+                        help="ATR multiplier for SL (default 3.0, reduces loss severity per 5-yr optimizer)")
+    parser.add_argument("--entry-mode", type=str, default="immediate",
+                        choices=["immediate", "next-candle"],
+                        help="Entry model: 'immediate' = FVG edge fills this candle (limit order, maker fee), 'next-candle' = defer to next open (market order, taker fee) — default: immediate (winning config)")
     parser.add_argument("--risk-pct", type=float, default=1.0,
                         help="Risk per trade %% of balance (default 1.0)")
+    parser.add_argument("--kill-zone-only", action="store_true",
+                        help="Only trade during London (07-09 UTC) and NY (13-15 UTC) kill zones")
+    parser.add_argument("--mtf", action="store_true",
+                        help="Enable multi-timeframe mode: 1H sweeps + 5m FVGs")
     parser.add_argument("--compound", action="store_true",
                         help="Compound capital across months (don't reset to initial each month)")
     args = parser.parse_args()
+
+    # Rebuild Combo521 detector with custom params
+    global _combo521, _combo521_mtf
+    _combo521 = Combo521Detector(
+        swing_lookback=2,
+        max_bars_after_sweep=args.max_bars,
+        min_gap_pct=args.min_gap_pct,
+        entry_mode="proximal",
+        kill_zone_only=args.kill_zone_only,
+    )
+    _combo521_mtf = Combo521MTFDetector(
+        max_1h_bars_after_sweep=12,
+        max_5m_bars_after_sweep=48,
+        min_gap_pct=args.min_gap_pct,
+        kill_zone_only=args.kill_zone_only,
+    )
 
     logger.remove()
     logger.add(sys.stderr, level="INFO",
@@ -665,7 +791,12 @@ async def main():
     symbols = [args.symbol.upper()] if args.symbol else SYMBOLS
     print(f"  Capital: ${BACKTEST_CAPITAL:,.0f} | {args.risk_pct}% risk | 3R TP | 5m entries")
     print(f"  SL: {args.sl_multiplier}x ATR | 0min cooldown")
-    print(f"  Strategy: Combo 521 (sweep+FVG, proximal entry, PD zone filter)")
+    if args.mtf:
+        print(f"  Strategy: Combo 521 MTF (1H sweep + 5m FVG, proximal entry, PD zone filter)")
+    else:
+        print(f"  Strategy: Combo 521 (5m sweep+FVG, proximal entry, PD zone filter)")
+    if args.kill_zone_only:
+        print(f"  Kill Zone filter: Enabled (London 07-09 / NY 13-15 UTC only)")
     print(f"  Symbols: {', '.join(symbols)}")
     if args.compound:
         print(f"  Mode: COMPOUNDING (capital carries across months)")
@@ -673,6 +804,12 @@ async def main():
         print(f"  DEBUG MODE: enabled (per-trade analysis)")
     if args.fee_pct > 0:
         print(f"  Fee: {args.fee_pct}% round-trip")
+    print(f"  Slippage: SL={args.sl_slippage_pct}% TP={args.tp_slippage_pct}%")
+    next_candle_entry = args.entry_mode == "next-candle"
+    if next_candle_entry:
+        print(f"  Entry: next-candle open (market order model, taker fee)")
+    else:
+        print(f"  Entry: immediate FVG edge (limit order model, maker fee) — default winning config")
     print("=" * 70 + "\n")
 
     # Save initial capital for compound mode return calculation
@@ -691,12 +828,12 @@ async def main():
             print(f"{'━'*70}")
 
         if args.parallel:
-            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct) for sym in symbols]
+            tasks = [backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry, mtf=args.mtf) for sym in symbols]
             results = await asyncio.gather(*tasks)
         else:
             results = []
             for sym in symbols:
-                r = await backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct)
+                r = await backtest_symbol(sym, before=before_str, debug=args.debug, fee_pct=args.fee_pct, sl_multiplier=args.sl_multiplier, risk_pct=args.risk_pct, sl_slippage_pct=args.sl_slippage_pct, tp_slippage_pct=args.tp_slippage_pct, next_candle_entry=next_candle_entry, mtf=args.mtf)
                 results.append(r)
                 print()
 

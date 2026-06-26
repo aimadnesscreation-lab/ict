@@ -166,20 +166,23 @@ class TradingOrchestrator:
 
 
                 try:
-                    await self.executor.place_order(
+                    result = await self.executor.place_order(
                         symbol=sym,
                         side=pos.side,
                         qty=pos.quantity,
                         price=pos.entry_price,
                         sl=pos.stop_loss,
                         tp=pos.take_profit,
-                        use_limit_order=False,  # market entry so orders fill immediately
+                        use_limit_order=True,  # post-only limit at FVG edge: matches backtest entry model (maker fee), may not fill all signals
                     )
-                    self.total_trades_executed += 1
-                    logger.info(
-                        f"[Orch][{sym}] Mirrored {pos.side} to Binance: "
-                        f"entry={pos.entry_price:.2f} SL={pos.stop_loss:.2f} TP={pos.take_profit:.2f}"
-                    )
+                    if result is not None:
+                        self.total_trades_executed += 1
+                        logger.info(
+                            f"[Orch][{sym}] Mirrored {pos.side} to Binance: "
+                            f"entry={pos.entry_price:.2f} SL={pos.stop_loss:.2f} TP={pos.take_profit:.2f}"
+                        )
+                    else:
+                        logger.info(f"[Orch][{sym}] Limit order not yet filled, will retry via SyncWorker")
                 except Exception as e:
                     logger.warning(f"[Orch][{sym}] Mirror to exchange failed: {e}")
 

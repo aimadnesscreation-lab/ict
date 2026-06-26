@@ -53,12 +53,12 @@ MAX_BARS_AFTER_SWEEP = 20
 FVG_MIN_GAP_PCT = 0.05
 ENTRY_MODE = "proximal"
 FIXED_R = 3.0
-SL_MULTIPLIER = 1.5  # ATR multiplier for stop-loss distance
+SL_MULTIPLIER = 3.0  # ATR multiplier for stop-loss distance (3.0x reduces loss severity per 5-yr optimizer)
 RISK_PER_TRADE_PCT = 1.0
 MAX_OPEN_POSITIONS = 3
 INITIAL_CAPITAL = 5000.0
 MAX_DAILY_LOSS_PCT = 3.0
-FEE_PCT = 0.06  # Binance Futures round-trip fee: maker entry (0.02%) + taker exit (0.04%)
+FEE_PCT = 0.10  # Binance Futures round-trip fee: 0.05% taker entry + 0.05% taker exit
 
 SYMBOL = "ETHUSDT"
 
@@ -198,7 +198,6 @@ def precompute_ict(df: pl.DataFrame) -> pl.DataFrame:
 
     # 2. Swing detection (center=True — 2-bar lookahead for n=2)
     df = _ict_ms.detect_swings(df)
-    df = _ict_ms.detect_bos_mss(df)
 
     # 3. FVG detection (uses shift(2) — backward-looking)
     df = _ict_fvg.detect_fvgs(df)
@@ -371,6 +370,11 @@ async def backtest_month(
     before: Optional[str] = None,
     debug: bool = False,
     fee_pct: float = FEE_PCT,
+    sl_multiplier: float = SL_MULTIPLIER,
+    sl_slippage_pct: float = 0.05,
+    tp_slippage_pct: float = 0.02,
+    next_candle_entry: bool = True,
+    risk_pct: float = RISK_PER_TRADE_PCT,
 ) -> Dict:
     """Run Combo 521 backtest on 30 days of 5m data."""
 
@@ -406,6 +410,7 @@ async def backtest_month(
     last_trade_date = rows[0]["timestamp"].date() if rows else datetime.now(timezone.utc).date()
 
     warmup = max(50, MAX_BARS_AFTER_SWEEP + 5)
+    _pending_signal: Optional[Dict] = None
 
     for i in range(warmup, total_candles):
         cur = rows[i]
@@ -419,6 +424,49 @@ async def backtest_month(
         if today != last_trade_date:
             daily_pnl = 0.0
             last_trade_date = today
+
+        # Step 0: Process pending signal from previous candle (next-candle-open entry)
+        # Models: signal fires at candle close → market order → fills at next candle's open
+        if next_candle_entry and _pending_signal is not None:
+            next_open = cur["open"]
+            _pending_signal["entry_price"] = next_open
+
+            sig = _pending_signal
+            sym = symbol
+            if sym not in open_positions:
+                side = sig["side"]
+                entry_price = next_open
+                atr = sig.get("atr", 0) or entry_price * 0.005
+
+                sl_dist = atr * sl_multiplier
+                tp_dist = sl_dist * FIXED_R
+
+                if side == "LONG":
+                    sl = entry_price - sl_dist
+                    tp = entry_price + tp_dist
+                else:
+                    sl = entry_price + sl_dist
+                    tp = entry_price - tp_dist
+
+                risk_unit = abs(entry_price - sl)
+                if risk_unit > 0:
+                    risk_amt = balance * (risk_pct / 100)
+                    qty = risk_amt / risk_unit
+
+                    open_positions[sym] = OpenPosition(
+                        symbol=sym, side=side,
+                        entry_time=cur_ts, entry_price=entry_price,
+                        stop_loss=sl, take_profit=tp,
+                        quantity=qty, risk_amount=risk_amt,
+                        atr_value=atr,
+                        fvg_top=sig.get("fvg_top", 0), fvg_bottom=sig.get("fvg_bottom", 0),
+                        sweep_price=sig.get("sweep_price", 0), entry_bar_index=i,
+                    )
+
+                    if debug:
+                        logger.info(f"  [{sym}] Pending Opened {side} @ ${entry_price:.2f} SL=${sl:.2f} TP=${tp:.2f} "
+                                    f"qty={qty:.4f} risk=${risk_amt:.2f}")
+            _pending_signal = None
 
         # ── Check open positions ──────────────────────────────────────
         for sym in list(open_positions.keys()):
@@ -442,6 +490,19 @@ async def backtest_month(
                     exit_price = pos.stop_loss
 
             if exit_reason and exit_price:
+                # Apply slippage to exit price
+                if sl_slippage_pct > 0 or tp_slippage_pct > 0:
+                    if exit_reason == "STOP_LOSS" and sl_slippage_pct > 0:
+                        if pos.side == "LONG":
+                            exit_price = exit_price * (1 - sl_slippage_pct / 100)
+                        else:
+                            exit_price = exit_price * (1 + sl_slippage_pct / 100)
+                    elif exit_reason == "TAKE_PROFIT" and tp_slippage_pct > 0:
+                        if pos.side == "LONG":
+                            exit_price = exit_price * (1 - tp_slippage_pct / 100)
+                        else:
+                            exit_price = exit_price * (1 + tp_slippage_pct / 100)
+
                 profit = ((exit_price - pos.entry_price) * pos.quantity) if pos.side == "LONG" \
                     else ((pos.entry_price - exit_price) * pos.quantity)
 
@@ -484,16 +545,26 @@ async def backtest_month(
         # ── Detect new signals ────────────────────────────────────────
         signals = find_active_signals(df_ict, i, lookback=MAX_BARS_AFTER_SWEEP, min_gap_pct=FVG_MIN_GAP_PCT)
 
-        for sig in signals:
-            sym = symbol
-            if sym in open_positions:
-                continue
+        if not signals:
+            continue
 
+        sig = signals[0]
+        sym = symbol
+        if sym in open_positions:
+            continue
+
+        if next_candle_entry:
+            # Store signal as pending — will execute at next candle's open
+            _pending_signal = sig
+            if debug:
+                logger.info(f"  [{sym}] Pending {sig['side']} @ ${sig['entry_price']:.2f} (will execute at next candle open)")
+        else:
+            # Execute immediately (original immediate entry behavior)
             side = sig["side"]
             entry_price = sig["entry_price"]
             atr = sig["atr"] or entry_price * 0.005  # fallback 0.5%
 
-            sl_dist = atr * SL_MULTIPLIER
+            sl_dist = atr * sl_multiplier
             tp_dist = sl_dist * FIXED_R
 
             if side == "LONG":
@@ -507,7 +578,7 @@ async def backtest_month(
             if risk_unit <= 0:
                 continue
 
-            risk_amt = balance * (RISK_PER_TRADE_PCT / 100)
+            risk_amt = balance * (risk_pct / 100)
             qty = risk_amt / risk_unit
 
             open_positions[sym] = OpenPosition(
@@ -594,7 +665,17 @@ async def main():
                         help=f"Minimum FVG gap %% (default {FVG_MIN_GAP_PCT})")
     parser.add_argument("--capital", type=float, default=INITIAL_CAPITAL,
                         help=f"Starting capital (default ${INITIAL_CAPITAL:,.0f})")
+    parser.add_argument("--sl-slippage-pct", type=float, default=0.05,
+                        help="SL exit slippage %% (default 0.05)")
+    parser.add_argument("--tp-slippage-pct", type=float, default=0.02,
+                        help="TP exit slippage %% (default 0.02)")
+    parser.add_argument("--no-next-candle-entry", action="store_true",
+                        help="Disable next-candle-open deferral — use immediate FVG edge entry")
+    parser.add_argument("--risk-pct", type=float, default=RISK_PER_TRADE_PCT,
+                        help=f"Risk per trade %% of balance (default {RISK_PER_TRADE_PCT})")
     args = parser.parse_args()
+
+    next_candle_entry = not args.no_next_candle_entry
 
     logger.remove()
     logger.add(sys.stderr, level="INFO" if not args.debug else "DEBUG",
@@ -623,7 +704,12 @@ async def main():
     print(f"    max_bars_after_sweep={MAX_BARS_AFTER_SWEEP}    fvg.min_gap_pct={args.min_gap_pct}%")
     print(f"    entry_mode={ENTRY_MODE}    fixed_r={FIXED_R}")
     print(f"    SL: {args.sl_multiplier}x ATR    Fee: {args.fee_pct}% round-trip")
-    print(f"    Capital: ${test_capital:,.0f}    Risk: {RISK_PER_TRADE_PCT}%/trade")
+    print(f"    Capital: ${test_capital:,.0f}    Risk: {args.risk_pct}%/trade")
+    if next_candle_entry:
+        print(f"    Entry: next-candle open")
+    else:
+        print(f"    Entry: immediate FVG edge")
+    print(f"    Slippage: SL={args.sl_slippage_pct}% TP={args.tp_slippage_pct}%")
     print(f"  {'='*70}\n")
 
     all_results = []
@@ -639,6 +725,11 @@ async def main():
 
         r = await backtest_month(
             SYMBOL, before=before_str, debug=args.debug, fee_pct=args.fee_pct,
+            sl_multiplier=args.sl_multiplier,
+            sl_slippage_pct=args.sl_slippage_pct,
+            tp_slippage_pct=args.tp_slippage_pct,
+            next_candle_entry=next_candle_entry,
+            risk_pct=args.risk_pct,
         )
         all_results.append(r)
 
@@ -709,11 +800,7 @@ async def main():
 
     # Reference comparison
     print(f"\n\n{'='*70}")
-    print(f"  REFERENCE VS ACTUAL")
-    print(f"{'='*70}")
-    print(f"  Reference (short period): 25 trades, 40% WR, PF 2.94, Sharpe 2.66, +12.2%, -3.7% DD")
-    print(f"  Actual ({total_months} months):  {total_trades} tr, {overall_wr*100:.1f}% WR, PF {pf:.2f}, "
-          f"Sharpe {sharpe:.2f}, +{total_return_pct:.1f}%, -{max_dd*100:.1f}% DD")
+    print(f"  SL Multiplier: {args.sl_multiplier}x ATR")
     print(f"{'='*70}\n")
 
 

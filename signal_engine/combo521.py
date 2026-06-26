@@ -25,11 +25,13 @@ class Combo521Detector:
         max_bars_after_sweep: int = 20,
         min_gap_pct: float = 0.05,
         entry_mode: str = "proximal",
+        kill_zone_only: bool = False,
     ):
         self.swing_lookback = swing_lookback
         self.max_bars_after_sweep = max_bars_after_sweep
         self.min_gap_pct = min_gap_pct
         self.entry_mode = entry_mode
+        self.kill_zone_only = kill_zone_only
 
     def detect(
         self,
@@ -60,6 +62,23 @@ class Combo521Detector:
             return []
 
         signals = self._find_active_signals(df, current_idx)
+
+        # Kill Zone filter: only allow signals during London (07-09 UTC) or NY (13-15 UTC)
+        if self.kill_zone_only and signals:
+            crow = df.row(current_idx, named=True)
+            candle_ts = crow.get("timestamp")
+            # Normalize to datetime for KZ check
+            if isinstance(candle_ts, (int, float)):
+                candle_ts = datetime.fromtimestamp(candle_ts / 1000, tz=timezone.utc)
+            if isinstance(candle_ts, datetime):
+                from ict_engine.sessions import is_in_window, KILL_ZONE_WINDOWS
+                in_kz = any(
+                    is_in_window(candle_ts, start, end)
+                    for name, (start, end) in KILL_ZONE_WINDOWS.items()
+                    if name in ("london_kill_zone", "new_york_kill_zone")
+                )
+                if not in_kz:
+                    signals = []
 
         result = []
         for sig in signals:

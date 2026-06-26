@@ -57,7 +57,7 @@ class ClosedTrade:
 class DemoAccount:
     def __init__(self, initial_balance: float = 5_000.0, risk_per_trade_pct: float = 1.0,
                  max_daily_loss_pct: float = 3.0, max_open_positions: int = 3,
-                 sl_multiplier: float = 1.5,
+                 sl_multiplier: float = 3.0,
                  reentry_cooldown_minutes: int = 60,
                  fixed_sl_pct: float = 0.0,
                  symbol_sl_multipliers: Optional[Dict[str, float]] = None,
