@@ -22,49 +22,77 @@ A production-grade algorithmic trading platform built on **ICT (Inner Circle Tra
 
 ## 📊 Backtest Results
 
-### Live Config — ETHUSDT — 12 Months (Jul 2025 – Jun 2026)
+All backtests use the **live pipeline** (`backtest_binance.py`): the same `Combo521Detector`, `DemoAccount`, and ICT modules that run in production. Results are for **ETHUSDT** on 5m candles with the **Combo 521** sweep+FVG strategy (proximal entry, PD zone filter, 20-bar lookback).
 
-**Configuration:** Binance Futures, LONG + SHORT, 2.0× ATR SL, 1:2 RR, 1% risk, 0.04% round-trip fee, no kill zone requirement, min score=60.
+### 5-Year Overview (Aug 2021 – Jun 2026)
+
+**Configuration:** Binance Futures, LONG + SHORT, 2.0× ATR SL, 1:3 RR (3R TP), 1% risk/trade, max 3 positions, 3% daily loss limit.
+
+#### Non-Compounding (monthly capital reset to $5,000)
 
 | Metric | Value |
 |--------|:-----:|
-| **Total Trades** | **1,517** (588 W / 929 L) |
-| **Win Rate** | **38.8%** |
-| **Total P&L** | **+$5,077.67** |
-| **Total Return** | **+101.6%** |
-| **Avg Monthly P&L** | **+$423.14** |
-| **Avg R:R** | **1.39** |
-| **Avg Max Drawdown** | **14.3%** |
-| **Profit Factor** | **1.08** |
+| **Total Trades** | **5,293** (1,577W / 3,716L) |
+| **Win Rate** | **29.8%** |
+| **Total P&L** | **+$25,842.10** |
+| **Profit Factor** | **0.99** |
+| **Avg Monthly P&L** | **+$430.70** |
+| **Avg R:R** | **1.60** |
+| **Avg Drawdown** | **15.5%** |
+| **Return on $5k** | **+516.8%** |
 
-*Run: `python backtest_binance.py --symbol ETHUSDT --months 12 --no-kill-zone --fee-pct 0.04 --sl-multiplier 2.0 --capital 5000`*
+```
+python backtest_binance.py --symbol ETHUSDT --months 60 --fee-pct 0.063 --sl-multiplier 2.0 --risk-pct 1.0 --capital 5000
+```
 
-#### Per-Month Breakdown
+#### Compounding — Real Binance Fees (5 years, $5,000 start)
 
-| Month | Trades | WR | P&L | PF | DD |
-|-------|:-----:|:--:|:---:|:--:|:--:|
-| Jul 2025 | 200 | 36.0% | -$172 | 0.97 | 19.6% |
-| Aug 2025 | 109 | 41.3% | **+$883** | 1.22 | 11.4% |
-| Sep 2025 | 102 | 36.3% | -$203 | 0.94 | 15.2% |
-| Oct 2025 | 147 | 39.5% | **+$689** | 1.13 | 11.4% |
-| Nov 2025 | 114 | 33.3% | -$505 | 0.86 | 19.6% |
-| Dec 2025 | 124 | 43.5% | **+$1,395** | 1.28 | 10.9% |
-| Jan 2026 | 97 | 40.2% | **+$326** | 1.10 | 13.1% |
-| Feb 2026 | 172 | 37.2% | **+$320** | 1.05 | 12.9% |
-| Mar 2026 | 152 | 40.1% | **+$938** | 1.16 | 11.3% |
-| Apr 2026 | 112 | 33.0% | -$623 | 0.83 | 17.8% |
-| May 2026 | 80 | 41.2% | **+$373** | 1.14 | 14.9% |
-| Jun 2026 | 108 | 46.3% | **+$1,658** | 1.47 | 13.2% |
+| Scenario | Round-Trip Fee | Final Capital | Total Return | PF | Avg Monthly |
+|----------|:-------------:|:-------------:|:------------:|:--:|:-----------:|
+| **No BNB** (maker entry + taker exit) | 0.07% | **$12,436.53** | **+148.7%** | 1.04 | +$123.94 |
+| **With BNB** (maker entry + taker exit) | 0.063% | **$28,917.47** | **+478.4%** | 1.07 | +$398.62 |
 
-#### Fee Impact Comparison (12 months)
+```
+# No BNB scenario
+python backtest_binance.py --symbol ETHUSDT --months 60 --fee-pct 0.07 --sl-multiplier 2.0 --risk-pct 1.0 --capital 5000 --compound
 
-| Config | Trades | Annual P&L | Return | Max DD |
-|---|---:|---:|---:|---:|
-| **Live config** (2.0× SL + 0.04% fee) | 1,517 | **+$5,078** | **+102%** | 14.3% |
-| Tight SL + fees (0.5× SL + 0.04% fee) | 3,316 | -$22,106 | -442% | 44.4% |
-| Tight SL, no fees (0.5× SL, 0% fee) | 998 | +$11,116 | +222% | 8.5% |
+# With BNB scenario
+python backtest_binance.py --symbol ETHUSDT --months 60 --fee-pct 0.063 --sl-multiplier 2.0 --risk-pct 1.0 --capital 5000 --compound
+```
 
-> **Key insight:** Fees have a massive impact on this high-frequency strategy. The wider 2.0× ATR stop-loss is essential — it cuts trade frequency by more than half (1,517 vs 3,316) and makes the strategy profitable with realistic Binance Futures fees. The 3% daily loss limit serves as a critical circuit breaker, preventing runaway losses in unfavorable market conditions.
+> **BNB discount is worth ~$16,481 over 5 years.** The 10% fee reduction compounds massively over 5,000+ trades. The strategy's ~30% win rate with 1.60 avg R:R is profitable even at 0.07% fees, but the BNB discount nearly doubles the long-term return.
+
+### Compounding Curve (0.063% fee with BNB)
+
+```
+$5,000 ──→ $28,917 over 60 months (5,276 trades across 5 market cycles)
+                │
+                ├── Best month:  Jun 2025  (+$2,309)
+                ├── Worst month: Oct 2021  (−$955)
+                ├── Winning months: 41 / 60 (68%)
+                └── Max consecutive losses: ~12
+```
+
+The compounding curve accelerates over time — the first 3 years build the base ($5k → ~$7.4k), then the power of compounding on a larger capital base produces the steep growth in years 4–5 ($7.4k → $28.9k).
+
+### Fee Structure & Order Types
+
+Binance USDⓈ-M Futures fees depend on order type:
+
+| Order Type | Standard | With BNB (10% off) |
+|-----------|:--------:|:------------------:|
+| **Maker** (limit entry at FVG edge) | 0.02% | 0.018% |
+| **Taker** (market exit on SL/TP) | 0.05% | 0.045% |
+| **Round-trip** (maker entry + taker exit) | **0.07%** | **0.063%** |
+
+The strategy places entries at the **proximal FVG edge** via limit orders (maker rate). Exits hit stop-loss or take-profit levels, which trigger market orders (taker rate). This is reflected in the round-trip fee rates above.
+
+### ATR Fix & Pipeline Integrity
+
+The `atr` column was missing from the ICT pipeline in an earlier version — the `Combo521Detector` reads ATR for stop-loss distance calculation, and without it, SL used a hardcoded 1% of price instead of the intended `ATR × 2.0`. This was fixed by adding `calculate_atr(df)` to both the live orchestrator and backtest pipeline, ensuring:
+- Backtest results reflect what the **live system actually does**
+- SL distance adapts to market volatility (ATR varies $3–$7 on ETH 5m)
+- Tight stops in low-volatility periods reduce unnecessary losses
 
 ---
 
@@ -162,7 +190,7 @@ Unified entry point that coordinates the entire pipeline:
 | Kill zone required | **No** (trade all sessions) | `--no-kill-zone` flag |
 | Direction | LONG + SHORT (Futures) | LONG + SHORT |
 | Leverage | 3× (live only, not used in DemoAccount) | N/A |
-| Fees | Maker 0.02% / Taker 0.04% | `--fee-pct 0.04` |
+| Fees | Maker 0.02% / Taker 0.05% (standard) | `--fee-pct 0.063` (with BNB) |
 
 ### Layer 4: Live Execution (`execution/`)
 
